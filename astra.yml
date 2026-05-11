@@ -1,0 +1,238 @@
+# ── Astra Agent Configuration ────────────────────────────────────────
+# Declarative agent team definitions. Drop this file next to your
+# docker-compose and run: docker compose up -d
+# The gateway loads this on startup and seeds agents into Postgres.
+
+# ── License ──────────────────────────────────────────────────────────
+# Enter your license key from https://openastra.net/pricing
+# Or set ASTRA_LICENSE_KEY env var. Runs unlicensed if omitted.
+
+license:
+  key: ${ASTRA_LICENSE_KEY}
+
+# ── Global Settings ─────────────────────────────────────────────────
+
+settings:
+  defaultAgent: assistant
+  defaultProvider: ollama
+  defaultModel: gemma4:26b
+
+# ── Quotas & Limits ──────────────────────────────────────────────────
+
+quotas:
+  tokens:
+    maxPerHour: 200000
+    maxPerDay: 1000000
+    maxPerMonth: 20000000
+  requests:
+    maxPerMinute: 30
+    maxPerHour: 500
+    maxPerDay: 5000
+  spawn: { maxDepth: 3, maxConcurrent: 5, maxPerDay: 100 }
+  cost:
+    maxPerDay: 5000
+    maxPerMonth: 50000
+  execution:
+    maxToolCallsPerRequest: 15
+    maxToolExecutionMs: 30000
+    maxConcurrentSessions: 10
+  swarm:
+    maxPromptTokens: 500000
+    maxCompletionTokens: 100000
+    maxTotalTokens: 600000
+    maxCostCents: 500
+    maxToolCalls: 100
+    maxDurationMs: 300000
+    maxAgents: 20
+    maxRequestsPerMinute: 30
+
+# ── Policies ─────────────────────────────────────────────────────────
+
+approval:
+  requireApproval: [shell_execute, financial_action, agent_spawn]
+  autoApprove: [memory_write, memory_delete]
+  timeoutMs: 300000
+  defaultOnTimeout: deny
+
+selfHealing:
+  enabled: true
+  heartbeatIntervalMs: 30000
+  maxConsecutiveFailures: 3
+  maxRestarts: 5
+  restartBackoffMs: 5000
+  compactionThreshold: 40
+  compactionTokenThreshold: 80000
+  deadSessionTimeoutMs: 86400000
+
+# ── Optional Features ────────────────────────────────────────────────
+
+dream:
+  enabled: false
+  intensity: medium
+  scheduleHour: 23
+  scheduleMinute: 0
+  useLocalOnly: true
+  promptUser: true
+
+research:
+  maxDurationHours: 24
+  iterationsPerDay: 12
+  intervalMinutes: 120
+  depth: moderate
+  extractToGraph: true
+  notifyOnProgress: true
+
+evolution:
+  enabled: false
+  minFeedbackSamples: 10
+  evolutionIntervalMs: 86400000
+  maxVariants: 3
+  adoptionThreshold: 0.15
+  autoAdopt: false
+
+localModels:
+  ollamaBaseUrl: http://localhost:11434
+  preferLocal: true
+  complexityThreshold: 0.7
+  contextThreshold: 32000
+  warmupOnStart: false
+  vllmEndpoints: []
+  # Example vLLM endpoint:
+  # - url: http://localhost:8000/v1
+  #   modelId: your-model-id
+  #   apiKey: no-key
+
+hotReload: { enabled: true, debounceMs: 1000 }
+
+# ── MCP Servers ──────────────────────────────────────────────────────
+# Connect to any MCP-compatible server. Tools are auto-registered as
+# mcp:{name}:{toolName} and available to all agents that allow them.
+
+mcpServers: []
+# Examples (uncomment to enable):
+#
+# stdio — runs a local process:
+#   - name: brave-search
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-brave-search"]
+#     env:
+#       BRAVE_API_KEY: ${BRAVE_API_KEY}
+#
+#   - name: filesystem
+#     transport: stdio
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+#
+# http — connects to a remote MCP server:
+#   - name: my-remote-server
+#     transport: http
+#     url: http://localhost:3001/mcp
+#     headers:
+#       Authorization: "Bearer ${MY_API_KEY}"
+
+# ── Channels & Services ──────────────────────────────────────────────
+# All credentials are env vars. Set these in your .env or deployment config:
+
+channels:
+  telegram:
+    enabled: false
+    token: ${TELEGRAM_BOT_TOKEN}
+    # userMap:
+    #   YOUR_TELEGRAM_USER_ID: standalone_user
+  imessage: { enabled: false }
+
+# GA4 Analytics (optional)
+# Set env var: GOOGLE_SERVICE_ACCOUNT_JSON (JSON contents)
+# Service account needs: Google Analytics Data API access
+
+# Gmail Task Automation (optional)
+# Set env vars:
+#   GMAIL_CREDENTIALS_JSON - Gmail service account JSON
+#   GMAIL_WHITELIST - Comma-separated trusted emails (e.g., "alice@company.com,bob@company.com")
+
+# ── Tool Groups ──────────────────────────────────────────────────────
+
+toolGroups:
+  memory: [memory-write, memory-search]
+  web: [web_search, url_fetch]
+  safe_deny: [shell-execute, file-write]
+
+# ── Agent Defaults ───────────────────────────────────────────────────
+
+defaults:
+  session: { dailyResetHour: 4, idleTimeoutMinutes: 120, maxContextMessages: 40 }
+  tools: { allow: [$memory], deny: [] }
+
+# ── Templates ────────────────────────────────────────────────────────
+
+# ── Agent Team ───────────────────────────────────────────────────────
+
+agents:
+  assistant:
+    displayName: Astra Assistant
+    tier: internal
+    model: { provider: ollama, modelId: gemma4:26b, maxContextTokens: 128000, maxOutputTokens: 8192, temperature: 0.7 }
+    systemPrompt: !include prompts/assistant.md
+    skills: [summarize, calculator]
+    tools: { allow: [$memory, web_search, url_fetch], deny: [] }
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 480, maxContextMessages: 50 }
+
+  researcher:
+    displayName: Research Agent
+    tier: internal
+    model: { provider: gemini, modelId: gemini-2.5-flash, maxContextTokens: 200000, maxOutputTokens: 8192, temperature: 0.3 }
+    systemPrompt: !include prompts/researcher.md
+    skills: [brave_search, web_scrape, summarize, knowledge_retrieve]
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 120, maxContextMessages: 30 }
+
+  coder:
+    displayName: Code Agent
+    tier: internal
+    model: { provider: claude, modelId: claude-sonnet-4-6, maxContextTokens: 200000, maxOutputTokens: 8192, temperature: 0.2 }
+    systemPrompt: !include prompts/coder.md
+    skills: [code_execute, calculator]
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 60, maxContextMessages: 40 }
+    spawn: { enabled: true, allowedTargets: [researcher], maxDepth: 2 }
+
+  deep_researcher:
+    displayName: DeepResearcher (Autonomous PhD Mode)
+    tier: internal
+    model: { provider: grok, modelId: grok-4-1-fast-reasoning, maxContextTokens: 131072, maxOutputTokens: 8192, temperature: 0.3 }
+    systemPrompt: !include prompts/deep-researcher.md
+    skills: [brave_search, web_scrape, summarize, knowledge_retrieve, translate, embed_text]
+    tools:
+      allow: [memory-write, memory-search, url-fetch, agent-spawn, research_manage, graph-query]
+      deny: [file-read, file-write, shell-execute]
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 0, maxContextMessages: 100 }
+    spawn: { enabled: true, allowedTargets: [researcher], maxDepth: 3 }
+
+  vision:
+    displayName: Vision Agent (Llama 4 Scout)
+    tier: internal
+    model:
+      provider: groq
+      modelId: meta-llama/llama-4-scout-17b-16e-instruct
+      maxContextTokens: 131072
+      maxOutputTokens: 8192
+      temperature: 0.5
+      capabilities: [vision, tool_calling]
+    systemPrompt: !include prompts/vision.md
+    skills: [image_describe, brave_search]
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 120, maxContextMessages: 30 }
+
+  local:
+    displayName: Local Agent (vLLM)
+    tier: internal
+    model:
+      provider: vllm
+      modelId: your-model-id
+      endpoint: http://localhost:8000/v1
+      maxContextTokens: 131072
+      maxOutputTokens: 8192
+      temperature: 0.7
+    systemPrompt: |
+      You are a helpful AI assistant running locally via Qwen3.5-35B.
+      Be concise and helpful. Answer questions directly.
+    tools: { allow: [$memory], deny: [shell-execute] }
+    session: { dailyResetHour: 4, idleTimeoutMinutes: 60, maxContextMessages: 50 }

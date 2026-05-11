@@ -1,0 +1,254 @@
+# ── OpenAstra Gateway — Default Values ───────────────────────────────────────
+# Override any of these in a separate values file or with --set flags.
+# Example: helm install openastra ./helm -f values-prod.yaml
+
+# -- Number of gateway replicas.
+replicaCount: 1
+
+image:
+  # -- Container image repository.
+  repository: openastra/gateway
+  # -- Image tag. Defaults to the chart's appVersion when set to "".
+  tag: "latest"
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Secrets used to pull images from a private registry.
+# ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+# - name: regcred
+
+# -- Override the default chart name.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+# ── Service Account ───────────────────────────────────────────────────────────
+serviceAccount:
+  # -- Whether to create a ServiceAccount.
+  create: true
+  # -- Annotations to add to the ServiceAccount (e.g. IRSA role ARN).
+  annotations: {}
+  # -- Name of the ServiceAccount to use. Auto-generated when empty.
+  name: ""
+
+# ── Pod Annotations & Labels ─────────────────────────────────────────────────
+podAnnotations: {}
+podLabels: {}
+
+# ── Pod Security Context ──────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# ── Container Security Context ────────────────────────────────────────────────
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  # readOnlyRootFilesystem is false because the app writes to /tmp.
+  # A tmpfs volume is mounted at /tmp instead (see volumes below).
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  # -- Kubernetes service type: ClusterIP | NodePort | LoadBalancer.
+  type: ClusterIP
+  # -- Service port exposed to the cluster.
+  port: 8080
+  # -- Target container port.
+  targetPort: 8080
+  # -- NodePort when type is NodePort. Leave 0 to auto-assign.
+  nodePort: 0
+  # -- Additional annotations for the Service (e.g. NLB annotations on AWS).
+  annotations: {}
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  # -- Enable Ingress resource.
+  enabled: false
+  # -- IngressClass name (e.g. nginx, traefik, alb).
+  className: "nginx"
+  # -- Additional annotations for the Ingress.
+  annotations: {}
+  #   cert-manager.io/cluster-issuer: letsencrypt-prod
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  # -- Ingress host rules.
+  hosts: []
+  # - host: astra.example.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  # -- TLS configuration.
+  tls: []
+  # - secretName: astra-tls
+  #   hosts:
+  #     - astra.example.com
+
+# ── Resource Requests & Limits ────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# ── Horizontal Pod Autoscaler ─────────────────────────────────────────────────
+autoscaling:
+  # -- Enable HPA.
+  enabled: false
+  # -- Minimum replica count.
+  minReplicas: 1
+  # -- Maximum replica count.
+  maxReplicas: 5
+  # -- CPU utilization target percentage.
+  targetCPUUtilizationPercentage: 70
+  # -- Memory utilization target percentage. Uncomment to enable.
+  # targetMemoryUtilizationPercentage: 80
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  # -- Enable PodDisruptionBudget.
+  enabled: true
+  # -- Minimum number of pods that must be available during disruptions.
+  # Use a string for percentage ("50%") or integer for absolute count.
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  # -- Seconds before the first liveness probe fires.
+  initialDelaySeconds: 30
+  # -- Probe interval in seconds.
+  periodSeconds: 15
+  # -- Number of consecutive failures to mark the container as unhealthy.
+  failureThreshold: 3
+  # -- Number of consecutive successes required after failure to mark healthy.
+  successThreshold: 1
+  # -- Probe timeout in seconds.
+  timeoutSeconds: 5
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+  successThreshold: 1
+  timeoutSeconds: 5
+
+# ── Application Secrets ───────────────────────────────────────────────────────
+secret:
+  # -- When true, the chart renders a Kubernetes Secret from the values below.
+  # Set to false and supply your own Secret (or use External Secrets Operator)
+  # when secrets are managed outside Helm.
+  create: true
+  # -- Name of the Secret. Defaults to "<fullname>-secrets" when empty.
+  name: ""
+  # -- Core application secrets. All values must be base64-encoded strings,
+  # OR use the `stringData` approach (the template uses stringData so plain
+  # text values are safe here — Kubernetes encodes them at apply time).
+  jwtSecret: ""
+  internalApiKey: ""
+  typesenseApiKey: ""
+
+# ── PostgreSQL (external — no bundled subchart) ───────────────────────────────
+# Point these at your operator-managed or cloud PostgreSQL instance.
+postgres:
+  # -- PostgreSQL hostname or service DNS name.
+  host: ""
+  # -- PostgreSQL port.
+  port: 5432
+  # -- Database name.
+  database: astra
+  # -- Database user.
+  user: astra
+  # -- Database password. Stored in the Secret when secret.create is true.
+  password: ""
+  # -- When secret.create is false, reference an existing Secret for PG_PASSWORD.
+  existingSecret:
+    # -- Name of the existing Secret.
+    name: ""
+    # -- Key inside the Secret that holds the password.
+    key: PG_PASSWORD
+
+# ── Typesense (external — no bundled subchart) ────────────────────────────────
+# Point these at your operator-managed Typesense instance.
+typesense:
+  # -- Typesense hostname or service DNS name.
+  host: ""
+  # -- Typesense API port.
+  port: 8108
+  # -- Protocol: http or https.
+  protocol: http
+
+# ── Extra Environment Variables ───────────────────────────────────────────────
+# Inject arbitrary env vars into the gateway container.
+# Each entry is a standard Kubernetes env var object.
+env:
+  extra: []
+  # - name: ANTHROPIC_API_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: llm-keys
+  #       key: anthropic
+  # - name: NODE_ENV
+  #   value: production
+  # - name: LOG_LEVEL
+  #   value: info
+
+# ── Node Scheduling ───────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Topology Spread Constraints ───────────────────────────────────────────────
+# Useful for spreading replicas across AZs in production.
+topologySpreadConstraints: []
+# - maxSkew: 1
+#   topologyKey: topology.kubernetes.io/zone
+#   whenUnsatisfiable: DoNotSchedule
+#   labelSelector:
+#     matchLabels:
+#       app.kubernetes.io/name: openastra
+
+# ── Volumes / Volume Mounts ───────────────────────────────────────────────────
+# The deployment always mounts a tmpfs at /tmp.
+# Add extra volumes here (e.g. ConfigMaps for astra.yml).
+extraVolumes: []
+# - name: astra-config
+#   configMap:
+#     name: astra-config
+
+extraVolumeMounts: []
+# - name: astra-config
+#   mountPath: /app/astra.yml
+#   subPath: astra.yml
+#   readOnly: true
+
+# ── Init Containers ───────────────────────────────────────────────────────────
+# The chart always injects a postgres-ready init container.
+# Add extra init containers here if needed.
+extraInitContainers: []
+
+# ── Deployment Strategy ───────────────────────────────────────────────────────
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# ── Termination ───────────────────────────────────────────────────────────────
+# Seconds the pod has to drain before SIGKILL.
+terminationGracePeriodSeconds: 30

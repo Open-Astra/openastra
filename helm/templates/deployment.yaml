@@ -1,0 +1,199 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "astra.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "astra.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "astra.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+  template:
+    metadata:
+      annotations:
+        {{- if .Values.secret.create }}
+        # Force a rollout whenever the chart-managed Secret content changes.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "astra.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "astra.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # ── Init Containers ─────────────────────────────────────────────────────
+      initContainers:
+        # Wait for PostgreSQL to accept connections before starting the gateway.
+        # Uses nc (netcat) which is present in node:20-slim via the netcat-openbsd
+        # package, or falls back to a /dev/tcp shell check.
+        - name: wait-for-postgres
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for PostgreSQL at {{ .Values.postgres.host }}:{{ .Values.postgres.port }} ..."
+              until nc -z {{ .Values.postgres.host }} {{ .Values.postgres.port }}; do
+                echo "  postgres not ready — sleeping 2s"
+                sleep 2
+              done
+              echo "PostgreSQL is reachable."
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- with .Values.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      # ── Containers ──────────────────────────────────────────────────────────
+      containers:
+        - name: gateway
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          # ── Environment Variables ──────────────────────────────────────────
+          env:
+            # Node runtime
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: {{ .Values.service.targetPort | quote }}
+
+            # Application secrets — sourced from Kubernetes Secret
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: JWT_SECRET
+            - name: INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: INTERNAL_API_KEY
+            - name: TYPESENSE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: TYPESENSE_API_KEY
+
+            # PostgreSQL connection
+            - name: PG_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: PG_HOST
+            - name: PG_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: PG_PORT
+            - name: PG_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: PG_DATABASE
+            - name: PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.secretName" . }}
+                  key: PG_USER
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "astra.postgresSecretName" . }}
+                  key: {{ include "astra.postgresPasswordKey" . }}
+
+            # Typesense connection
+            - name: TYPESENSE_HOST
+              value: {{ .Values.typesense.host | quote }}
+            - name: TYPESENSE_PORT
+              value: {{ .Values.typesense.port | quote }}
+            - name: TYPESENSE_PROTOCOL
+              value: {{ .Values.typesense.protocol | quote }}
+
+            # Extra freeform env vars supplied by the operator
+            {{- with .Values.env.extra }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+          # ── Probes ─────────────────────────────────────────────────────────
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+          # ── Resources ──────────────────────────────────────────────────────
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # ── Volume Mounts ──────────────────────────────────────────────────
+          volumeMounts:
+            # tmpfs mount satisfies any app writes to /tmp without requiring
+            # readOnlyRootFilesystem: true on the root filesystem.
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+      # ── Volumes ─────────────────────────────────────────────────────────────
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      # ── Scheduling ──────────────────────────────────────────────────────────
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

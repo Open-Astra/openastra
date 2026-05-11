@@ -1,0 +1,100 @@
+# ── Astra Full-Stack Local Deployment ──────────────────────────
+# One command to run everything: Postgres (pgvector), Typesense, and
+# the Astra gateway with all channels and agent teams.
+#
+# Usage:
+#   docker compose up -d                   # start everything
+#   docker compose up -d postgres typesense # services only (for npm run cli)
+#   docker compose logs -f gateway         # watch gateway logs
+#   docker compose down                    # stop everything
+#
+# Configure agents in astra.yml (loaded automatically on start).
+# Set API keys in .env file.
+
+services:
+  # ── PostgreSQL + pgvector ───────────────────────────────────────
+  # pgvector enables vector similarity search directly in Postgres,
+  # powering graph memory embeddings without external services.
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: astra
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env (use a random value, e.g. openssl rand -hex 16)}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Typesense ───────────────────────────────────────────────────
+  # Hybrid search engine: BM25 keyword + vector similarity for
+  # semantic memory retrieval (30% BM25 + 70% vector).
+  typesense:
+    image: typesense/typesense:27.1
+    command: --data-dir /data --api-key=${TYPESENSE_API_KEY:?Set TYPESENSE_API_KEY in .env (use a random value, e.g. openssl rand -hex 16)} --enable-cors
+    ports:
+      - "${TYPESENSE_PORT:-8108}:8108"
+    volumes:
+      - tsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8108' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Astra Gateway ──────────────────────────────────────────
+  # The full agent runtime: REST API, WebSocket, Telegram, iMessage,
+  # YAML agent teams, and all middleware.
+  gateway:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DATABASE: astra
+      PG_USER: postgres
+      PG_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: 8108
+      TYPESENSE_PROTOCOL: http
+      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY:?Set TYPESENSE_API_KEY in .env}
+      # Embeddings: "gemini" (requires GEMINI_API_KEY) or "local" (zero-dependency)
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+    volumes:
+      # Mount astra.yml for agent team configuration
+      - ./astra.yml:/app/astra.yml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      typesense:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # ── Security Hardening ──────────────────────────────────────────
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: 1.0
+    user: "1000:1000"
+
+volumes:
+  pgdata:
+  tsdata:

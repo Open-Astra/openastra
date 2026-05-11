@@ -1,0 +1,57 @@
+OpenAstra Gateway {{ .Chart.AppVersion }} deployed successfully.
+Release: {{ .Release.Name }} | Namespace: {{ .Release.Namespace }}
+
+1. Get the application URL:
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+
+{{- else if eq .Values.service.type "NodePort" }}
+  export NODE_PORT=$(kubectl get svc {{ include "astra.fullname" . }} \
+    -n {{ .Release.Namespace }} \
+    -o jsonpath="{.spec.ports[0].nodePort}")
+  export NODE_IP=$(kubectl get nodes \
+    -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "Gateway: http://${NODE_IP}:${NODE_PORT}"
+
+{{- else if eq .Values.service.type "LoadBalancer" }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+
+  export LB_IP=$(kubectl get svc {{ include "astra.fullname" . }} \
+    -n {{ .Release.Namespace }} \
+    -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+  echo "Gateway: http://${LB_IP}:{{ .Values.service.port }}"
+
+{{- else }}
+  # Port-forward for local access:
+  kubectl port-forward svc/{{ include "astra.fullname" . }} \
+    8080:{{ .Values.service.port }} \
+    -n {{ .Release.Namespace }}
+  echo "Gateway: http://localhost:8080"
+{{- end }}
+
+2. Check gateway health:
+
+  curl http://<gateway-address>/health
+
+3. Watch pod status:
+
+  kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} \
+    -n {{ .Release.Namespace }} -w
+
+4. Stream gateway logs:
+
+  kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }} \
+    -n {{ .Release.Namespace }} -f --tail=100
+
+{{- if not .Values.secret.create }}
+
+WARNING: secret.create is false. You must create a Kubernetes Secret named
+"{{ include "astra.secretName" . }}" containing:
+  JWT_SECRET, INTERNAL_API_KEY, TYPESENSE_API_KEY,
+  PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
+
+See k8s/external-secrets.yaml for an External Secrets Operator example.
+{{- end }}

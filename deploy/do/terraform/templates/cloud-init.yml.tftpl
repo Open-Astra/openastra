@@ -1,0 +1,124 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/ufw/applications.d/astra
+    content: |
+      [Astra]
+      title=Astra Gateway
+      description=Astra AI Agent Platform
+      ports=8080/tcp
+
+  - path: /opt/astra/.env
+    permissions: "0600"
+    content: |
+      NODE_ENV=production
+      PORT=8080
+      PG_HOST=${db_host}
+      PG_PORT=${db_port}
+      PG_USER=${db_user}
+      PG_PASSWORD=${db_password}
+      PG_DATABASE=${db_name}
+      PG_SSL=true
+      PG_SSLMODE=${db_sslmode}
+      TYPESENSE_HOST=localhost
+      TYPESENSE_PORT=8108
+      TYPESENSE_PROTOCOL=http
+      TYPESENSE_API_KEY=${typesense_api_key}
+      JWT_SECRET=${jwt_secret}
+      INTERNAL_API_KEY=${internal_api_key}
+      LLM_API_KEY=${llm_api_key}
+      EMBEDDING_PROVIDER=local
+
+  - path: /opt/astra/docker-compose.yml
+    content: |
+      services:
+        typesense:
+          image: typesense/typesense:27.1
+          container_name: typesense
+          restart: always
+          command: --data-dir /data --api-key=${typesense_api_key} --enable-cors
+          ports:
+            - "127.0.0.1:8108:8108"
+          volumes:
+            - /mnt/${volume_name}:/data
+          healthcheck:
+            test: ["CMD", "curl", "-sf", "http://localhost:8108/health"]
+            interval: 15s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+
+        gateway:
+          image: ${gateway_image}
+          container_name: gateway
+          restart: always
+          env_file: .env
+          ports:
+            - "8080:8080"
+          volumes:
+            - ./astra.yml:/app/astra.yml:ro
+          depends_on:
+            typesense:
+              condition: service_healthy
+          healthcheck:
+            test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 30s
+          read_only: true
+          tmpfs:
+            - /tmp:size=128m
+          security_opt:
+            - no-new-privileges:true
+          cap_drop:
+            - ALL
+          deploy:
+            resources:
+              limits:
+                memory: 1g
+                cpus: "2.0"
+
+  - path: /etc/systemd/system/astra.service
+    content: |
+      [Unit]
+      Description=Astra AI Agent Platform
+      Requires=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/astra
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 8080/tcp
+  - ufw --force enable
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+  - docker pull typesense/typesense:27.1
+  - docker pull ${gateway_image}
+  - systemctl enable astra
+  - systemctl start astra

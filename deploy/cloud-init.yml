@@ -1,0 +1,157 @@
+#cloud-config
+# ── Open Astra — DigitalOcean Droplet Bootstrap ──────────
+# This cloud-init script provisions a single Droplet with the full
+# Astra stack: Docker, Postgres (pgvector), Typesense, and the
+# gateway — ready to accept API keys and start serving.
+#
+# Usage:
+#   doctl compute droplet create astra \
+#     --image ubuntu-24-04-x64 \
+#     --size s-2vcpu-4gb \
+#     --region nyc1 \
+#     --user-data-file deploy/cloud-init.yml \
+#     --ssh-keys <your-key-id>
+#
+# After provisioning (~3 min):
+#   ssh root@<droplet-ip>
+#   cd /opt/astra
+#   nano .env           # add your API keys
+#   docker compose up -d
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - git
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+
+write_files:
+  # Firewall rules — only expose SSH, HTTP, HTTPS
+  - path: /etc/ufw/applications.d/astra
+    content: |
+      [Astra]
+      title=Astra Agent Gateway
+      description=Astra HTTP/WS gateway
+      ports=8080/tcp
+
+  # Systemd service to auto-start Astra on boot
+  - path: /etc/systemd/system/astra.service
+    content: |
+      [Unit]
+      Description=Open Astra
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/astra
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=120
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Minimal .env with placeholders
+  - path: /opt/astra/.env
+    permissions: "0600"
+    content: |
+      # ── Astra Environment ─────────────────────────────────────
+      # Set at least ONE inference API key below.
+
+      # Inference providers (set at least one)
+      ANTHROPIC_API_KEY=
+      # OPENAI_API_KEY=
+      # GROK_API_KEY=
+
+      # PostgreSQL (matches docker-compose defaults — no changes needed)
+      PG_HOST=postgres
+      PG_PORT=5432
+      PG_DATABASE=astra
+      PG_USER=postgres
+      PG_PASSWORD=PLACEHOLDER_PG
+
+      # Typesense (matches docker-compose defaults — no changes needed)
+      TYPESENSE_API_KEY=PLACEHOLDER_TS
+      TYPESENSE_HOST=typesense
+      TYPESENSE_PORT=8108
+      TYPESENSE_PROTOCOL=http
+
+      # Embeddings: "local" (zero-dependency) or "gemini" (requires GEMINI_API_KEY)
+      EMBEDDING_PROVIDER=local
+
+      # Auto-generated secrets (filled by cloud-init)
+      JWT_SECRET=PLACEHOLDER_JWT
+      INTERNAL_API_KEY=PLACEHOLDER_INTERNAL
+
+      # ── Optional: Messaging Channels ──────────────────────────
+      # TELEGRAM_BOT_TOKEN=
+      # DISCORD_BOT_TOKEN=
+      # SLACK_BOT_TOKEN=
+      # SLACK_SIGNING_SECRET=
+
+      # ── Optional: Skills ──────────────────────────────────────
+      # BRAVE_API_KEY=
+      # RESEND_API_KEY=
+
+runcmd:
+  # ── Install Docker ─────────────────────────────────────────────
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable docker
+  - systemctl start docker
+
+  # ── Clone Astra ────────────────────────────────────────────────
+  - git clone https://github.com/Contra-Collective/openastra.git /opt/astra
+  - cd /opt/astra
+
+  # ── Generate secrets ───────────────────────────────────────────
+  - |
+    JWT_SECRET=$(openssl rand -hex 32)
+    INTERNAL_KEY=$(openssl rand -hex 24)
+    sed -i "s|PLACEHOLDER_JWT|${JWT_SECRET}|" /opt/astra/.env
+    sed -i "s|PLACEHOLDER_INTERNAL|${INTERNAL_KEY}|" /opt/astra/.env
+
+  # ── Firewall ───────────────────────────────────────────────────
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ssh
+  - ufw allow 8080/tcp
+  - ufw --force enable
+
+  # ── Enable fail2ban ────────────────────────────────────────────
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+
+  # ── Pull images (pre-warm, don't start yet — user needs API keys)
+  - cd /opt/astra && docker compose pull
+
+  # ── Enable auto-start on boot ──────────────────────────────────
+  - systemctl daemon-reload
+  - systemctl enable astra.service
+
+  # ── Drop a welcome message ─────────────────────────────────────
+  - |
+    cat > /etc/motd << 'MOTD'
+
+    ╔══════════════════════════════════════════════════╗
+    ║           Open Astra                    ║
+    ║                                                  ║
+    ║  Get started:                                    ║
+    ║    cd /opt/astra                                 ║
+    ║    nano .env          # add your API keys        ║
+    ║    docker compose up -d                          ║
+    ║                                                  ║
+    ║  Check status:                                   ║
+    ║    docker compose ps                             ║
+    ║    curl localhost:8080/health                    ║
+    ║                                                  ║
+    ║  Docs: https://github.com/Contra-Collective/openastra  ║
+    ╚══════════════════════════════════════════════════╝
+
+    MOTD
+
+final_message: "Astra provisioning complete ($UPTIME seconds). SSH in and add your API keys to /opt/astra/.env"

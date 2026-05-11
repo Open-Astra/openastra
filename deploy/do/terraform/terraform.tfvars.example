@@ -1,0 +1,45 @@
+# DigitalOcean API token
+# Generate at: https://cloud.digitalocean.com/account/api/tokens
+do_token = "dop_v1_your_token_here"
+
+# Region (nyc1, nyc3, sfo3, lon1, ams3, sgp1, etc.)
+do_region = "nyc1"
+
+# Project naming
+project_name = "astra"
+environment  = "production"
+
+# Compute
+# s-1vcpu-2gb = $12/mo, s-2vcpu-4gb = $24/mo, s-4vcpu-8gb = $48/mo
+droplet_size  = "s-2vcpu-4gb"
+droplet_image = "ubuntu-24-04-x64"
+
+# SSH keys (required)
+# Find fingerprints: doctl compute ssh-key list
+ssh_key_fingerprints = ["your:ssh:key:fingerprint:here"]
+
+# Docker image for the gateway
+# After pushing to DO Container Registry:
+#   docker tag astra-gateway registry.digitalocean.com/astra-registry/gateway:latest
+#   docker push registry.digitalocean.com/astra-registry/gateway:latest
+gateway_image = "registry.digitalocean.com/astra-registry/gateway:latest"
+
+# Database
+# db-s-1vcpu-1gb = ~$15/mo, db-s-1vcpu-2gb = ~$30/mo
+db_size       = "db-s-1vcpu-1gb"
+db_node_count = 1
+
+# Typesense persistent storage (GB)
+typesense_volume_size = 20
+
+# Secrets (generate with: openssl rand -hex 32)
+jwt_secret        = ""
+typesense_api_key = ""
+internal_api_key  = ""
+llm_api_key       = ""
+
+# Optional: domain name
+# domain = "astra.example.com"
+
+# Optional: floating IP for stable addressing
+floating_ip = true

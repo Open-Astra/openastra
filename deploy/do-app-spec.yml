@@ -1,0 +1,119 @@
+# ── Open Astra — DigitalOcean App Platform Spec ──────────
+# Deploy Astra as a managed app with a managed Postgres database.
+#
+# Usage:
+#   doctl apps create --spec deploy/do-app-spec.yml
+#
+# Or import via the DigitalOcean dashboard:
+#   Apps → Create App → Import from GitHub → use this spec
+#
+# IMPORTANT: After deploy, set REAL secrets in the dashboard:
+#   1. Generate secrets: openssl rand -hex 32 (for JWT_SECRET)
+#   2. Generate secrets: openssl rand -hex 24 (for INTERNAL_API_KEY, TYPESENSE_API_KEY)
+#   3. Set at least one inference key: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GROK_API_KEY
+#   4. Optional: channel tokens (TELEGRAM_BOT_TOKEN, etc.)
+#
+# The gateway will REFUSE to start in production with placeholder values.
+
+name: astra
+
+region: nyc
+
+services:
+  - name: gateway
+    github:
+      repo: Contra-Collective/openastra
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: professional-xs
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 30
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      # ── Required (auto-configured) ──────────────────────────
+      - key: PORT
+        value: "8080"
+      - key: NODE_ENV
+        value: "production"
+      - key: PG_HOST
+        value: "${db-astra.HOSTNAME}"
+      - key: PG_PORT
+        value: "${db-astra.PORT}"
+      - key: PG_DATABASE
+        value: "${db-astra.DATABASE}"
+      - key: PG_USER
+        value: "${db-astra.USERNAME}"
+      - key: PG_PASSWORD
+        value: "${db-astra.PASSWORD}"
+      - key: PG_USE_SOCKET
+        value: "false"
+      # ── Auto-generated secrets ──────────────────────────────
+      - key: JWT_SECRET
+        type: SECRET
+        value: "CHANGE_ME_AFTER_DEPLOY"
+      - key: INTERNAL_API_KEY
+        type: SECRET
+        value: "CHANGE_ME_AFTER_DEPLOY"
+      # ── Typesense (sidecar worker) ─────────────────────────
+      - key: TYPESENSE_HOST
+        value: "${typesense.PRIVATE_URL}"
+      - key: TYPESENSE_PORT
+        value: "8108"
+      - key: TYPESENSE_PROTOCOL
+        value: "http"
+      - key: TYPESENSE_API_KEY
+        type: SECRET
+        value: "CHANGE_ME_AFTER_DEPLOY"
+      # ── Embeddings ─────────────────────────────────────────
+      - key: EMBEDDING_PROVIDER
+        value: "local"
+      # ── Inference (set at least one after deploy) ──────────
+      - key: ANTHROPIC_API_KEY
+        type: SECRET
+        value: ""
+      - key: OPENAI_API_KEY
+        type: SECRET
+        value: ""
+      - key: GROK_API_KEY
+        type: SECRET
+        value: ""
+      # ── Optional: Channels ─────────────────────────────────
+      - key: TELEGRAM_BOT_TOKEN
+        type: SECRET
+        value: ""
+      - key: DISCORD_BOT_TOKEN
+        type: SECRET
+        value: ""
+
+  # ── Typesense Worker ───────────────────────────────────────────
+  # Runs Typesense as an internal worker (not publicly exposed).
+  - name: typesense
+    image:
+      registry_type: DOCKER_HUB
+      registry: typesense
+      repository: typesense
+      tag: "27.1"
+    internal_ports:
+      - 8108
+    instance_count: 1
+    instance_size_slug: professional-xs
+    run_command: --data-dir /data --api-key=${TYPESENSE_API_KEY} --enable-cors
+    envs:
+      - key: TYPESENSE_API_KEY
+        type: SECRET
+        value: "CHANGE_ME_AFTER_DEPLOY"
+
+# ── Managed PostgreSQL ───────────────────────────────────────────
+databases:
+  - name: db-astra
+    engine: PG
+    version: "16"
+    size: db-s-1vcpu-1gb
+    num_nodes: 1

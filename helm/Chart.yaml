@@ -1,0 +1,17 @@
+apiVersion: v2
+name: openastra
+description: Multi-agent runtime platform with dynamic agent creation, hierarchical swarm orchestration, and plug-and-play inference for 7 LLM providers.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - agents
+  - llm
+  - multi-agent
+home: https://github.com/openastra/openastra
+sources:
+  - https://github.com/openastra/openastra
+maintainers:
+  - name: OpenAstra Team
+    email: hello@openastra.dev

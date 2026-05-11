@@ -1,0 +1,37 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+.env.local
+.env.production
+.env.staging
+
+# Certificates and keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+
+# Service account credentials
+credentials.json
+service-account.json
+service-account-key.json
+
+# Local databases
+*.sqlite
+*.sqlite3
+
+# Build artifacts
+*.tsbuildinfo
+
+# IDE and tool config
+.claude/
+CLAUDE.md
+.playwright-mcp/

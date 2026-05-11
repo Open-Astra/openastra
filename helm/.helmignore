@@ -1,0 +1,42 @@
+# Patterns to ignore when building packages.
+# This supports shell glob matching, relative path matching, and
+# negation (prefixed with !). Only one pattern per line.
+
+# Common VCS directories
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+
+# Common backup files
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# macOS metadata
+.DS_Store
+
+# Windows metadata
+Thumbs.db
+
+# Editor project files
+.idea/
+.vscode/
+*.iml
+
+# CI
+.github/
+.circleci/
+
+# Build artifacts
+*.tgz
+
+# Development overrides — never package local values files
+values-local.yaml
+values-dev.yaml
+values-override.yaml

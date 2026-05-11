@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package astra;
+
+service AgentService {
+  rpc RunAgentLoop (AgentRequest) returns (AgentResponse);
+  rpc RunAgentLoopStream (AgentRequest) returns (stream AgentStreamEvent);
+  rpc SpawnAgent (SpawnRequest) returns (SpawnResponse);
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message AgentRequest {
+  string uid = 1;
+  string message = 2;
+  string agent_id = 3;
+  string surface = 4;
+  string surface_id = 5;
+  string session_id = 6;  // optional, for resuming
+}
+
+message AgentResponse {
+  string content = 1;
+  string session_id = 2;
+  repeated ToolResult tool_results = 3;
+  TokenUsage token_usage = 4;
+}
+
+message AgentStreamEvent {
+  string type = 1;        // session_resolved, stream_delta, tool_call, tool_result, completed, error
+  string content = 2;     // varies by type
+  string session_id = 3;
+  string tool_name = 4;
+  int32 tool_duration_ms = 5;
+  string error = 6;
+  TokenUsage token_usage = 7;
+}
+
+message SpawnRequest {
+  string uid = 1;
+  string parent_agent_id = 2;
+  string target_agent_id = 3;
+  string task = 4;
+  int32 depth = 5;
+}
+
+message SpawnResponse {
+  string task_id = 1;
+  string target_agent_id = 2;
+  string content = 3;
+  bool success = 4;
+  int32 duration_ms = 5;
+  string session_id = 6;
+  string error = 7;
+}
+
+message ToolResult {
+  string name = 1;
+  int32 duration_ms = 2;
+  string error = 3;
+}
+
+message TokenUsage {
+  int32 prompt = 1;
+  int32 completion = 2;
+  int32 total = 3;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  int64 timestamp = 2;
+}
