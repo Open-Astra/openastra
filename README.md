@@ -1,5 +1,10 @@
 # Open Astra — [openastra.net](https://openastra.net)
 
+[![CI](https://github.com/Open-Astra/openastra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Open-Astra/openastra/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Open-Astra/openastra?sort=semver)](https://github.com/Open-Astra/openastra/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Security policy](https://img.shields.io/badge/security-policy-brightgreen.svg)](SECURITY.md)
+
 **The agent runtime built for engineers.**
 
 Open Astra for teams who build on top of agents — 5-tier memory, hierarchical swarms, 10 inference providers, B2B operations platform, and a full REST API. Zero-config to start, production-ready when you need it.
@@ -21,6 +26,8 @@ Open Astra ships zero community plugins and zero external MCP servers. Every too
 There are no marketplace extensions phoning home. There are no hosted MCP servers running proprietary code between your data and your agent. If something runs in your agent loop, it is in this repository.
 
 Security hardening includes fail-closed JWT revocation, row-level security middleware, SSRF IP pinning with redirect blocking, brute-force login protection, and GDPR-complete user data erasure across all memory tiers.
+
+See the [threat model](src/security/THREAT_MODEL.md) for trust boundaries, assets, and mitigations, and [SECURITY.md](SECURITY.md) to report a vulnerability privately.
 
 ---
 
