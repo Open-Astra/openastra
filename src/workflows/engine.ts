@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentConfig } from "../agents/types.js";
 import type { InferenceClient } from "../inference/types.js";
 import { createLogger } from "../utils/logger.js";
@@ -62,6 +63,10 @@ export interface WorkflowOutput {
   durationMs: number;
 }
 
+// The run (who started it, in which workspace) is carried to every step so
+// tool steps execute as that user under normal tool policy.
+const runStore = new AsyncLocalStorage<WorkflowRun>();
+
 // ── Engine ───────────────────────────────────────────────────────────
 
 export async function executeWorkflow(
@@ -82,10 +87,12 @@ export async function executeWorkflow(
   try {
     // Linear execution with condition-based jumps
     const executionOrder = buildExecutionOrder(definition.steps, stepMap, vars);
-    for (const step of executionOrder) {
-      await executeStep(step, vars, resolveClient, stepMap);
-      stepCount++;
-    }
+    await runStore.run(run, async () => {
+      for (const step of executionOrder) {
+        await executeStep(step, vars, resolveClient, stepMap);
+        stepCount++;
+      }
+    });
 
     return {
       runId: run.id,
@@ -162,23 +169,70 @@ async function executeToolStep(
   step: ToolStep,
   vars: Record<string, unknown>,
 ): Promise<void> {
-  const { getTool } = await import("../tools/registry.js");
+  const { getTool, executeTool } = await import("../tools/registry.js");
+  const { getToolRiskLevel } = await import("../tools/risk-levels.js");
   const tool = getTool(step.toolName);
   if (!tool) {
     throw new Error(`Workflow tool step "${step.id}": tool not found: ${step.toolName}`);
   }
 
-  // Interpolate params with current vars
-  const interpolatedParams = JSON.parse(interpolate(JSON.stringify(step.params), vars));
-  const parsed = tool.parameters.parse(interpolatedParams);
-  const result = await tool.execute(parsed, {
-    uid: "workflow",
-    agentId: "workflow",
-    sessionId: randomUUID(),
-  });
+  const run = runStore.getStore();
+  if (!run?.uid) {
+    throw new Error(`Workflow tool step "${step.id}": no authenticated run context`);
+  }
 
-  vars[step.outputVar] = result;
+  // Outside a workspace there is no role to check, so only low-risk tools
+  // may run. Inside a workspace executeTool() applies role-based access.
+  const risk = getToolRiskLevel(step.toolName);
+  if (!run.workspaceId && risk !== "READ_ONLY" && risk !== "SAFE") {
+    throw new Error(
+      `Workflow tool step "${step.id}": tool "${step.toolName}" (${risk}) requires a workspace context`,
+    );
+  }
+
+  // Interpolate vars into string values of the params structure. (Never
+  // into the serialized JSON: a variable containing quotes could otherwise
+  // inject additional parameters.)
+  const interpolatedParams = deepInterpolate(step.params, vars);
+
+  // Go through executeTool(): the caller's effective allow/deny policy
+  // (when the workflow was started by an agent), RBAC, rate limits, guards
+  // and the approval gate all apply. The step runs as the user who started
+  // the run — not as an anonymous "workflow" principal.
+  const result = await executeTool(
+    { id: randomUUID(), name: step.toolName, arguments: JSON.stringify(interpolatedParams) },
+    {
+      uid: run.uid,
+      agentId: "workflow",
+      sessionId: `workflow:${run.id}`,
+      workspaceId: run.workspaceId || undefined,
+    },
+    new Set([step.toolName]),
+  );
+  if (result.error) {
+    throw new Error(`Workflow tool step "${step.id}" failed: ${result.error}`);
+  }
+
+  let value: unknown = result.content;
+  try {
+    value = JSON.parse(result.content);
+  } catch { /* keep raw content */ }
+
+  vars[step.outputVar] = value;
   logger.info(`[workflow] tool step ${step.id} -> ${step.outputVar} set`);
+}
+
+function deepInterpolate(value: unknown, vars: Record<string, unknown>): unknown {
+  if (typeof value === "string") return interpolate(value, vars);
+  if (Array.isArray(value)) return value.map((v) => deepInterpolate(v, vars));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = deepInterpolate(v, vars);
+    }
+    return out;
+  }
+  return value;
 }
 
 async function executeParallelStep(

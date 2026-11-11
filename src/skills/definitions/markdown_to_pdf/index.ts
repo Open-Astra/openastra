@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { writeFile } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { tryGuardPath } from "../../../tools/path-guard.js";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
 
@@ -277,11 +279,24 @@ const markdownToPdfSkill: SkillDefinition = {
         "Convert markdown content to a print-ready HTML file. Supports headers, code blocks, tables, lists, bold, italic, links, images, and blockquotes.",
       parameters: MarkdownToPdfParams,
 
-      async execute(params) {
+      async execute(params, toolCtx) {
         const title = params.title ?? "Document";
-        const outputPath = params.outputPath ?? "/tmp/astra-export.html";
+        // Output is confined to the working directory (default: exports/),
+        // symlink-resolved, and may not overwrite secrets or application code.
+        const guardedPath = tryGuardPath(params.outputPath ?? "exports/astra-export.html", {
+          access: "write",
+          agentId: toolCtx?.agentId,
+        });
+        if (!guardedPath.ok) {
+          return { error: guardedPath.error };
+        }
+        const outputPath = guardedPath.path;
+        if (!/\.html?$/i.test(outputPath)) {
+          return { error: "outputPath must end in .html" };
+        }
 
         try {
+          await mkdir(dirname(outputPath), { recursive: true });
           const bodyHtml = convertMarkdownToHtml(params.markdown);
           const fullHtml = wrapInHtmlDocument(bodyHtml, title);
 

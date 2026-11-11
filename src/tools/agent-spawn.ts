@@ -4,6 +4,7 @@ import { getAgentConfig } from "../config/agents.js";
 import { spawnAgent, SpawnError } from "../agents/spawn.js";
 import { createInferenceClient } from "../inference/factory.js";
 import type { AgentId } from "../agents/types.js";
+import { getExecutionPolicy } from "./policy.js";
 
 // ── agent_spawn ────────────────────────────────────────────────────
 // Delegates a task to a sub-agent in an isolated session.
@@ -26,8 +27,18 @@ registerTool({
   parameters: AgentSpawnParams,
 
   async execute(params, ctx) {
-    const parentConfig = getAgentConfig(ctx.agentId);
     const targetAgentId = params.targetAgentId as AgentId;
+    let parentConfig;
+    try {
+      parentConfig = getAgentConfig(ctx.agentId);
+    } catch {
+      return { success: false, error: `Unknown parent agent: ${ctx.agentId}`, code: "SPAWN_DISABLED" };
+    }
+    // Depth comes from the running execution chain: a spawned child that
+    // spawns again is one level deeper. Tool restrictions and denies travel
+    // on the same chain (see tools/policy.ts), so re-reading the registry
+    // config here cannot widen what a restricted child may do.
+    const depth = (getExecutionPolicy()?.spawnDepth ?? 0) + 1;
 
     // ── gRPC spawn path ──────────────────────────────────────────────
     // When USE_GRPC_SPAWN=true, route spawn calls over gRPC instead of
@@ -46,7 +57,7 @@ registerTool({
             parentAgentId: ctx.agentId,
             targetAgentId,
             task: params.task,
-            depth: 1,
+            depth,
           });
 
           if (!result.success) {
@@ -80,8 +91,13 @@ registerTool({
     // ── Direct in-process spawn path (default) ───────────────────────
 
     // Create an inference client for the target agent's model config
-    const targetConfig = getAgentConfig(targetAgentId);
-    const inferenceClient = createInferenceClient(targetConfig.model);
+    let inferenceClient;
+    try {
+      const targetConfig = getAgentConfig(targetAgentId);
+      inferenceClient = createInferenceClient(targetConfig.model);
+    } catch {
+      return { success: false, error: `Target agent not found: ${targetAgentId}`, code: "TARGET_NOT_FOUND" };
+    }
 
     try {
       const result = await spawnAgent(
@@ -90,7 +106,8 @@ registerTool({
         params.task,
         ctx.uid,
         inferenceClient,
-        1, // depth starts at 1 for a direct spawn from a parent agent
+        depth,
+        { workspaceId: ctx.workspaceId },
       );
 
       return {

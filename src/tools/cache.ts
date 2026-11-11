@@ -55,8 +55,17 @@ const NEVER_CACHE = new Set([
 
 const cache = new Map<string, CacheEntry>();
 
-function cacheKey(toolName: string, args: string): string {
-  const hash = createHash("sha256").update(`${toolName}:${args}`).digest("hex").slice(0, 16);
+// Results are scoped to the caller. A result computed for one user or
+// workspace must never be served to another, so the scope is part of the key.
+export interface CacheScope {
+  uid: string;
+  workspaceId?: string | null;
+  agentId?: string;
+}
+
+function cacheKey(toolName: string, args: string, scope: CacheScope): string {
+  const scopeKey = JSON.stringify([scope.uid, scope.workspaceId ?? "", scope.agentId ?? ""]);
+  const hash = createHash("sha256").update(`${toolName}:${scopeKey}:${args}`).digest("hex").slice(0, 32);
   return `${toolName}:${hash}`;
 }
 
@@ -82,14 +91,25 @@ function evictLRU(): void {
   }
 }
 
+// Side-effecting or secret-bearing tools registered after the list above
+// was written. Matched with hyphens/underscores treated as equivalent.
+const NEVER_CACHE_EXTRA = [
+  "code_execute", "sql_query", "database_query", "file_fetch", "file_read", "file_list",
+  "patch_apply", "approval_resolve", "delegate_tool_call", "browser", "git_ops", "run_tests",
+  "gmail_read", "gmail_send", "email_send", "memory_export", "memory_import", "http_request",
+];
+const normalizeCacheName = (n: string): string => n.trim().toLowerCase().replace(/-/g, "_");
+const NEVER_CACHE_NORMALIZED = new Set([...NEVER_CACHE, ...NEVER_CACHE_EXTRA].map(normalizeCacheName));
+
 export function shouldCache(toolName: string): boolean {
-  return !NEVER_CACHE.has(toolName);
+  return !NEVER_CACHE_NORMALIZED.has(normalizeCacheName(toolName));
 }
 
-export function getCachedResult(toolName: string, args: string): string | null {
+export function getCachedResult(toolName: string, args: string, scope: CacheScope): string | null {
   if (!shouldCache(toolName)) return null;
+  if (!scope?.uid) return null;
 
-  const key = cacheKey(toolName, args);
+  const key = cacheKey(toolName, args, scope);
   const entry = cache.get(key);
   if (!entry) return null;
 
@@ -103,8 +123,9 @@ export function getCachedResult(toolName: string, args: string): string | null {
   return entry.result;
 }
 
-export function setCachedResult(toolName: string, args: string, result: string): void {
+export function setCachedResult(toolName: string, args: string, result: string, scope: CacheScope): void {
   if (!shouldCache(toolName)) return;
+  if (!scope?.uid) return;
 
   // Periodic cleanup
   if (cache.size > MAX_ENTRIES * 0.9) {
@@ -112,7 +133,7 @@ export function setCachedResult(toolName: string, args: string, result: string):
     evictLRU();
   }
 
-  const key = cacheKey(toolName, args);
+  const key = cacheKey(toolName, args, scope);
   cache.set(key, {
     result,
     cachedAt: Date.now(),

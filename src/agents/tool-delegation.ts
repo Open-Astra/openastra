@@ -176,6 +176,43 @@ export async function delegateToolCall(
       return result;
     }
 
+    // The target agent must itself be permitted to run the tool: in its
+    // allow list (directly or through one of its skills) and not denied.
+    // Without this, delegation was a way to run any registered tool.
+    let targetDeny: string[] = [];
+    try {
+      const { getAgentConfig } = await import("../config/agents.js");
+      const { getSkillToolNames } = await import("../skills/registry.js");
+      const { toolSetHas } = await import("../tools/policy.js");
+      const targetConfig = getAgentConfig(targetAgentId);
+      targetDeny = targetConfig.tools.deny ?? [];
+      const targetAllow = new Set<string>([
+        ...targetConfig.tools.allow,
+        ...getSkillToolNames(targetConfig.skills ?? []),
+      ]);
+      if (!toolSetHas(targetAllow, request.toolName) || toolSetHas(new Set(targetDeny), request.toolName)) {
+        const result: DelegationResult = {
+          requestId: request.requestId,
+          success: false,
+          delegatedTo: targetAgentId,
+          durationMs: Date.now() - start,
+          error: `Agent "${targetAgentId}" is not permitted to run tool "${request.toolName}"`,
+        };
+        recordDelegation(ctx.sessionId, result);
+        return result;
+      }
+    } catch {
+      const result: DelegationResult = {
+        requestId: request.requestId,
+        success: false,
+        delegatedTo: targetAgentId,
+        durationMs: Date.now() - start,
+        error: `Delegation target "${targetAgentId}" could not be resolved`,
+      };
+      recordDelegation(ctx.sessionId, result);
+      return result;
+    }
+
     // Build tool call
     const toolCall = {
       id: randomUUID(),
@@ -190,6 +227,8 @@ export async function delegateToolCall(
       sessionId: ctx.sessionId,
       workspaceId: ctx.workspaceId,
       traceId: ctx.traceId,
+      // Denies from both sides apply (deny always wins).
+      deniedTools: [...new Set([...(ctx.deniedTools ?? []), ...targetDeny])],
       metadata: {
         ...(ctx.metadata ?? {}),
         delegatedFrom: request.fromAgentId,
@@ -200,6 +239,9 @@ export async function delegateToolCall(
       },
     };
 
+    // executeTool() additionally intersects this with the calling agent's
+    // effective policy (tools/policy.ts): the delegating agent can only
+    // delegate tools it is itself allowed to call.
     const allowedTools = new Set([request.toolName]);
     const toolResult = await executeTool(toolCall, targetCtx, allowedTools);
 

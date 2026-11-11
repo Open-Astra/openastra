@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── http_request ──────────────────────────────────────────────────────
 // Flexible HTTP client with auth support, SSRF protection, and full
@@ -105,7 +105,7 @@ registerTool({
 
       // Always use redirect: "manual" and validate each hop against SSRF guard
       while (true) {
-        res = await fetch(currentUrl, {
+        res = await safeFetch(currentUrl, {
           method: params.method,
           headers,
           body: bodyStr,

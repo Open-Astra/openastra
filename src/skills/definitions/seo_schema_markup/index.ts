@@ -13,7 +13,7 @@ const SchemaGenerateParams = z.object({
     "BreadcrumbList", "Organization", "WebSite", "Event", "Recipe",
     "VideoObject", "SoftwareApplication", "Review",
   ]).describe("Schema.org type to generate"),
-  data: z.record(z.unknown()).describe("Key-value data to populate the schema"),
+  data: z.record(z.string(), z.unknown()).describe("Key-value data to populate the schema"),
 });
 
 interface SchemaIssue {
@@ -45,7 +45,7 @@ const seoSchemaMarkupSkill: SkillDefinition = {
 
       async execute(params) {
         const { url } = params;
-        const response = await safeFetch(url, { timeout: 15_000 });
+        const response = await safeFetch(url, { timeoutMs: 15_000 });
         const html = await response.text();
 
         const schemas = extractJsonLd(html);

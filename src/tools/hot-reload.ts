@@ -148,6 +148,14 @@ export function createToolHotReloader(
   // ── Public API ───────────────────────────────────────────────────
   return {
     start(): void {
+      // Hot-reload re-imports source files at runtime, which turns any file
+      // write primitive into code execution. It only runs when an operator
+      // explicitly opts in AND the process is not in production.
+      if (process.env.ASTRA_HOT_RELOAD !== "true" || process.env.NODE_ENV === "production") {
+        logger.dim("Tool hot-reload disabled (set ASTRA_HOT_RELOAD=true in a non-production environment to enable)");
+        return;
+      }
+
       if (watcher) {
         logger.warn("Hot-reloader already running");
         return;

@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { guardPath } from "../../../tools/path-guard.js";
+import { isStandaloneMode, minimalChildEnv } from "../../../tools/exec-sandbox.js";
 
 // ── Git Operations Skill ────────────────────────────────────────────
 // Git repository operations: status, diff, log, branch management.
@@ -55,14 +58,58 @@ const StashParams = z.object({
   repoPath: z.string().optional().describe("Repository path (default: GIT_REPO_PATH or cwd)"),
 });
 
+// Hardening applied to every git invocation:
+//   - hooks disabled (a repo's hooks are arbitrary code)
+//   - ext:: / file-less transports off, no credential or terminal prompts
+//   - minimal environment (no gateway secrets, no inherited GIT_* overrides)
+const GIT_SAFE_FLAGS = [
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "protocol.ext.allow=never",
+  "-c", "core.fsmonitor=false",
+  "-c", "core.pager=cat",
+];
+
+function gitEnv(): Record<string, string> {
+  return minimalChildEnv({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_PAGER: "cat" });
+}
+
 function gitExec(args: string[], cwd: string): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf-8", timeout: 10_000 }).trim().slice(0, MAX_OUTPUT);
+    return execFileSync("git", [...GIT_SAFE_FLAGS, ...args], { cwd, encoding: "utf-8", timeout: 10_000, env: gitEnv() })
+      .trim()
+      .slice(0, MAX_OUTPUT);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `ERROR: ${msg.slice(0, 500)}`;
   }
 }
+
+// ── Argument validation ─────────────────────────────────────────────
+// Values that reach git's argv must never be interpretable as options
+// (`--output=...`, `--upload-pack=...`, `-c ...`) or as transport URLs.
+
+const REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._\/@^~{}-]{0,199}$/;
+const REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+
+function checkRef(value: string | undefined, label: string): string | null {
+  if (value === undefined) return null;
+  if (!REF_NAME.test(value) || value.includes("..")) return `Invalid ${label}: "${value.slice(0, 60)}"`;
+  return null;
+}
+
+function checkRemote(value: string): string | null {
+  // Must be the NAME of a configured remote — never a URL, path or option.
+  return REMOTE_NAME.test(value) ? null : `Invalid remote name: "${value.slice(0, 60)}"`;
+}
+
+function checkPathspec(value: string, label: string): string | null {
+  if (value.startsWith("-") || value.startsWith(":") || value.includes("\0")) {
+    return `Invalid ${label}: "${value.slice(0, 60)}"`;
+  }
+  return null;
+}
+
+class GitRepoError extends Error {}
 
 const gitOpsSkill: SkillDefinition = {
   name: "git_ops",
@@ -81,15 +128,38 @@ const gitOpsSkill: SkillDefinition = {
   },
 
   init(ctx: PluginContext) {
-    const getRepo = (override?: string) => override ?? process.env.GIT_REPO_PATH ?? process.cwd();
+    // Resolve and validate the repository directory.
+    //   - must be inside the operator-configured GIT_REPO_PATH (or cwd)
+    //   - symlink-resolved; secret paths refused; agent fileAccess honoured
+    //   - mutating operations in server mode require GIT_REPO_PATH, so an
+    //     agent can never commit to / check out over the gateway's own tree
+    const getRepo = (override: string | undefined, agentId: string | undefined, mutate = false): string => {
+      const configured = process.env.GIT_REPO_PATH;
+      if (mutate && !isStandaloneMode() && !configured) {
+        throw new GitRepoError(
+          "Write git operations are disabled in server mode unless the operator sets GIT_REPO_PATH.",
+        );
+      }
+      const base = resolve(configured ?? process.cwd());
+      try {
+        return guardPath(override ?? base, { access: "list", agentId, baseDir: base });
+      } catch (err) {
+        throw new GitRepoError(err instanceof Error ? err.message : "Invalid repository path");
+      }
+    };
 
     ctx.registerTool({
       name: "git_status",
       description: "Show the working tree status of a git repository.",
       parameters: StatusParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, false);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
         const status = gitExec(["status", "--short"], cwd);
         const branch = gitExec(["branch", "--show-current"], cwd);
 
@@ -97,11 +167,11 @@ const gitOpsSkill: SkillDefinition = {
         let ahead = 0;
         let behind = 0;
         try {
-          const aheadStr = execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], { cwd, encoding: "utf-8", timeout: 10_000 }).trim();
+          const aheadStr = execFileSync("git", [...GIT_SAFE_FLAGS, "rev-list", "--count", "@{upstream}..HEAD"], { cwd, encoding: "utf-8", timeout: 10_000, env: gitEnv() }).trim();
           ahead = parseInt(aheadStr, 10) || 0;
         } catch { /* no upstream */ }
         try {
-          const behindStr = execFileSync("git", ["rev-list", "--count", "HEAD..@{upstream}"], { cwd, encoding: "utf-8", timeout: 10_000 }).trim();
+          const behindStr = execFileSync("git", [...GIT_SAFE_FLAGS, "rev-list", "--count", "HEAD..@{upstream}"], { cwd, encoding: "utf-8", timeout: 10_000, env: gitEnv() }).trim();
           behind = parseInt(behindStr, 10) || 0;
         } catch { /* no upstream */ }
 
@@ -123,10 +193,17 @@ const gitOpsSkill: SkillDefinition = {
       description: "Show recent git commit history.",
       parameters: LogParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, false);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
+        const refError = checkRef(params.branch, "branch");
+        if (refError) return { error: refError };
         const args = ["log", "--oneline", "--format=%H|%h|%s|%an|%ar", `-${params.limit}`];
-        if (params.branch) args.push(params.branch);
+        if (params.branch) args.push("--end-of-options", params.branch, "--");
         const log = gitExec(args, cwd);
 
         const commits = log.split("\n").filter((l) => l.includes("|")).map((line) => {
@@ -143,14 +220,23 @@ const gitOpsSkill: SkillDefinition = {
       description: "Show git diff (staged or unstaged changes).",
       parameters: DiffParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, false);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
 
-        const diffArgs: string[] = ["diff"];
+        if (params.file) {
+          const fileError = checkPathspec(params.file, "file");
+          if (fileError) return { error: fileError };
+        }
+        const diffArgs: string[] = ["diff", "--no-ext-diff", "--no-textconv"];
         if (params.staged) diffArgs.push("--cached");
         if (params.file) diffArgs.push("--", params.file);
 
-        const statArgs: string[] = ["diff"];
+        const statArgs: string[] = ["diff", "--no-ext-diff", "--no-textconv"];
         if (params.staged) statArgs.push("--cached");
         statArgs.push("--stat");
         if (params.file) statArgs.push("--", params.file);
@@ -167,8 +253,13 @@ const gitOpsSkill: SkillDefinition = {
       description: "List branches, show current branch, or create a new branch.",
       parameters: BranchParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, params.action === "create");
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
 
         switch (params.action) {
           case "current":
@@ -184,7 +275,9 @@ const gitOpsSkill: SkillDefinition = {
           }
           case "create": {
             if (!params.name) return { error: "Branch name required for create action." };
-            const result = gitExec(["branch", params.name], cwd);
+            const nameError = checkRef(params.name, "branch name");
+            if (nameError) return { error: nameError };
+            const result = gitExec(["branch", "--end-of-options", params.name], cwd);
             return result.startsWith("ERROR") ? { error: result } : { success: true, created: params.name };
           }
         }
@@ -196,12 +289,21 @@ const gitOpsSkill: SkillDefinition = {
       description: "Stage files and create a git commit.",
       parameters: CommitParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, true);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
 
         if (params.files && params.files.length > 0) {
           // Stage specific files then commit
-          const addResult = gitExec(["add", ...params.files], cwd);
+          for (const f of params.files) {
+            const fileError = checkPathspec(f, "file");
+            if (fileError) return { error: fileError };
+          }
+          const addResult = gitExec(["add", "--", ...params.files], cwd);
           if (addResult.startsWith("ERROR")) return { error: addResult };
           const commitResult = gitExec(["commit", "-m", params.message], cwd);
           return commitResult.startsWith("ERROR")
@@ -222,11 +324,19 @@ const gitOpsSkill: SkillDefinition = {
       description: "Switch branches or create a new branch.",
       parameters: CheckoutParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, true);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
+        const refError = checkRef(params.branch, "branch");
+        if (refError) return { error: refError };
         const args: string[] = ["checkout"];
         if (params.create) args.push("-b");
-        args.push(params.branch);
+        args.push("--end-of-options", params.branch);
+        if (!params.create) args.push("--");
         const result = gitExec(args, cwd);
         return result.startsWith("ERROR")
           ? { error: result }
@@ -239,11 +349,20 @@ const gitOpsSkill: SkillDefinition = {
       description: "Push commits to a remote repository.",
       parameters: PushParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, true);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
         const remote = params.remote ?? "origin";
         const branch = params.branch ?? "HEAD";
-        const result = gitExec(["push", remote, branch], cwd);
+        const remoteError = checkRemote(remote);
+        if (remoteError) return { error: remoteError };
+        const refError = checkRef(branch, "branch");
+        if (refError) return { error: refError };
+        const result = gitExec(["push", "--end-of-options", remote, branch], cwd);
         return result.startsWith("ERROR")
           ? { error: result }
           : { success: true, remote, branch, output: result };
@@ -255,8 +374,13 @@ const gitOpsSkill: SkillDefinition = {
       description: "Stash or restore uncommitted changes.",
       parameters: StashParams,
 
-      async execute(params) {
-        const cwd = getRepo(params.repoPath);
+      async execute(params, toolCtx) {
+        let cwd: string;
+        try {
+          cwd = getRepo(params.repoPath, toolCtx?.agentId, true);
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : "Invalid repository path" };
+        }
 
         switch (params.action) {
           case "push": {

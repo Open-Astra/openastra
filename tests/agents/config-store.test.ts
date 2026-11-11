@@ -133,13 +133,23 @@ describe("getAgentConfigById", () => {
     expect(config).toBeNull();
   });
 
-  it("queries without workspaceId when workspaceId is null", async () => {
+  it("restricts to global agents when workspaceId is null (personal scope)", async () => {
     mockPool.query.mockResolvedValue({ rows: [makeAgentRow()] });
 
     await getAgentConfigById("agent-1", null);
 
+    const [sql, params] = mockPool.query.mock.calls[0];
+    // A request with no workspace must never match another tenant's agent
+    expect(sql).toContain("workspace_id IS NULL");
+    expect(params).toEqual(["agent-1"]);
+  });
+
+  it("is unscoped only when workspaceId is omitted (internal callers)", async () => {
+    mockPool.query.mockResolvedValue({ rows: [makeAgentRow()] });
+
+    await getAgentConfigById("agent-1");
+
     const [sql] = mockPool.query.mock.calls[0];
-    // Should be a simpler query without workspace_id filter
     expect(sql).not.toContain("workspace_id");
   });
 });

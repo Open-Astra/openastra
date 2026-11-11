@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
 import { getPool } from "../config/postgres.js";
+import { guardSelect, runGuardedSelect, SQL_ALLOWED_TABLES } from "./sql-guard.js";
 
 // ── database_query ────────────────────────────────────────────────────
 // Execute read-only SQL queries against the Astra Postgres database.
@@ -15,20 +16,8 @@ const DatabaseQueryParams = z.object({
     .describe("Optional parameterized query values ($1, $2, etc.)"),
 });
 
-// Table allowlist — same as sql-query.ts. Only these tables are accessible.
-const ALLOWED_TABLES = new Set([
-  "daily_memories",
-  "graph_entities",
-  "graph_edges",
-  "procedural_memory",
-  "session_messages",
-  "workspace_members",
-  "tool_tasks",
-  "skill_metrics",
-  "sessions",
-  "agent_configs",
-  "billing_usage",
-]);
+// Table allowlist + tenant scoping live in sql-guard.ts (shared with sql-query).
+const ALLOWED_TABLES = new Set<string>(SQL_ALLOWED_TABLES);
 
 // Block access to system catalogs via schema-qualified names
 const BLOCKED_SCHEMAS = new Set([
@@ -88,122 +77,61 @@ const QUERY_TIMEOUT_MS = 15_000; // 15s statement timeout
 registerTool({
   name: "database_query",
   description:
-    "Execute a read-only SQL query against the Astra PostgreSQL database. Only SELECT statements are allowed — INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, and other write operations are blocked. Uses database-level read-only transaction enforcement. Supports parameterized queries.",
+    `Execute a read-only SQL SELECT against your own data in the Astra PostgreSQL database. One table per query (no joins, subqueries, CTEs or comments); rows are automatically restricted to the calling user/workspace. Supports parameterized queries. Tables: ${[...ALLOWED_TABLES].join(", ")}.`,
   parameters: DatabaseQueryParams,
-  async execute(params) {
-    // Strip comments and normalize whitespace for safety check
-    const normalized = params.query
-      .replace(/--[^\n]*/g, "")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .trim();
-
-    // First line of defense: regex-based blocklist
-    for (const pattern of BLOCKED_STATEMENTS) {
-      if (pattern.test(normalized)) {
+  async execute(params, ctx) {
+    // First line of defense: keyword blocklists (cheap, clear errors).
+    for (const pattern of [...BLOCKED_STATEMENTS, ...BLOCKED_FUNCTIONS]) {
+      if (pattern.test(params.query)) {
         return {
-          error: "Only SELECT queries are allowed. Write operations (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE) are blocked for safety.",
+          error: "Only single-table SELECT queries are allowed. Write operations and server-side file/network functions are blocked.",
         };
       }
     }
-
-    // Ensure the query starts with SELECT only. CTEs (WITH) are blocked because
-    // their inner bodies bypass the FROM/JOIN table allowlist check below.
-    const firstWord = normalized.split(/\s+/)[0]?.toUpperCase();
-    if (firstWord !== "SELECT") {
-      return {
-        error: `Only SELECT queries are allowed. Got: ${firstWord}`,
-      };
-    }
-
-    // Check for dangerous functions that can bypass table-level restrictions
-    for (const pattern of BLOCKED_FUNCTIONS) {
-      if (pattern.test(normalized)) {
-        return { error: `Query contains a blocked function: ${pattern.source}` };
-      }
-    }
-
-    // Reject double-quoted identifiers — they bypass the table regex
-    if (/"[^"]+"/.test(normalized)) {
-      return { error: "Double-quoted identifiers are not allowed" };
-    }
-
-    // Table allowlist: extract table names from FROM/JOIN and validate
-    const tablePattern = /\b(?:FROM|JOIN)\s+(?:([a-zA-Z_][a-zA-Z0-9_]*)\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi;
-    let tableMatch: RegExpExecArray | null;
-    const referencedTables: string[] = [];
-
-    while ((tableMatch = tablePattern.exec(normalized)) !== null) {
-      const schema = tableMatch[1]?.toLowerCase();
-      const tableName = tableMatch[2]!.toLowerCase();
-
-      if (schema && BLOCKED_SCHEMAS.has(schema)) {
+    for (const schema of BLOCKED_SCHEMAS) {
+      if (new RegExp(`\\b${schema}\\b`, "i").test(params.query)) {
         return { error: `Schema "${schema}" is not accessible` };
       }
-
-      referencedTables.push(tableName);
-      if (!ALLOWED_TABLES.has(tableName)) {
-        return {
-          error: `Table "${tableName}" is not in the allowed table list. Allowed: ${[...ALLOWED_TABLES].join(", ")}`,
-        };
-      }
     }
 
-    if (referencedTables.length === 0) {
-      return { error: "Query must reference at least one table via FROM or JOIN" };
+    // Structural validation + tenant scoping. The validated, rewritten SQL
+    // is what gets executed — never the caller's original text.
+    const guarded = guardSelect(
+      params.query,
+      params.params as unknown[] | undefined,
+      { uid: ctx?.uid, workspaceId: ctx?.workspaceId },
+      { limit: MAX_ROWS, maxLimit: MAX_ROWS },
+    );
+    if (!guarded.ok) {
+      return { error: guarded.error };
     }
 
-    // Second line of defense: database-level read-only enforcement
-    // Acquire a dedicated client from the pool so we can set transaction mode.
+    // Second line of defense: database-level read-only enforcement.
     const pool = getPool();
     const client = await pool.connect();
-
     try {
-      // Set a statement timeout to prevent long-running queries
-      await client.query(`SET statement_timeout = ${QUERY_TIMEOUT_MS}`);
-
-      // Begin a READ ONLY transaction — Postgres will reject any
-      // write attempt at the engine level, regardless of SQL tricks.
-      await client.query("BEGIN TRANSACTION READ ONLY");
-
-      const result = await client.query(
-        params.query,
-        params.params as unknown[] | undefined,
-      );
-
-      await client.query("COMMIT");
-
+      const result = await runGuardedSelect(client, guarded, QUERY_TIMEOUT_MS);
       const rows = result.rows.slice(0, MAX_ROWS);
-      const fields = result.fields.map((f) => f.name);
-      const truncated = result.rowCount != null && result.rowCount > MAX_ROWS;
-
+      const truncated = result.rows.length > MAX_ROWS;
       return {
         rows,
-        rowCount: result.rowCount ?? 0,
-        fields,
+        rowCount: result.rowCount,
+        fields: result.fields.map((f) => f.name),
         truncated,
         ...(truncated ? { message: `Results truncated to ${MAX_ROWS} rows` } : {}),
       };
     } catch (err) {
-      // Rollback on any error (including read-only violations)
-      try {
-        await client.query("ROLLBACK");
-      } catch {
-        // ignore rollback errors
-      }
-
       const msg = err instanceof Error ? err.message : String(err);
-
-      // Provide a clear message for read-only violations
       if (msg.includes("read-only transaction")) {
         return {
           error: "Query attempted a write operation, which is blocked. Only read-only SELECT queries are permitted.",
         };
       }
-
       return { error: msg };
     } finally {
-      // Always release the client back to the pool
       client.release();
     }
   },
 });
+
+export const _testOnly = { ALLOWED_TABLES, BLOCKED_SCHEMAS, BLOCKED_FUNCTIONS, BLOCKED_STATEMENTS };

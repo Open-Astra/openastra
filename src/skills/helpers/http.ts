@@ -2,7 +2,7 @@
 // Fetch with timeout, retry, and SSRF protection.
 // Delegates SSRF validation to the centralized ssrf-guard (DNS resolution + IP pinning).
 
-import { isBlockedUrl } from "../../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch as pinnedFetch } from "../../utils/ssrf-guard.js";
 
 export class SsrfError extends Error {
   constructor(url: string) {
@@ -25,6 +25,11 @@ export interface FetchOptions {
   maxRetries?: number;
   retryDelayMs?: number;
   ssrfProtection?: boolean;
+  /**
+   * Redirects are never followed automatically (each hop would need to be
+   * re-validated); callers receive the 3xx response. Accepted for clarity.
+   */
+  redirect?: "manual";
 }
 
 export async function safeFetch(
@@ -52,7 +57,10 @@ export async function safeFetch(
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-      const response = await fetch(url, {
+      // DNS-pinned fetch (no rebinding window) when SSRF protection is on;
+      // plain fetch only for callers that explicitly opted out.
+      const doFetch = ssrfProtection ? pinnedFetch : fetch;
+      const response = await doFetch(url, {
         method,
         headers,
         body,

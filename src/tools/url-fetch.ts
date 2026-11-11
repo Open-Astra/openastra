@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── url_fetch Tool ──────────────────────────────────────────────────
 // Fetches a URL and returns the response body. Supports JSON and text
@@ -50,7 +50,7 @@ registerTool({
     const timeout = setTimeout(() => controller.abort(), params.timeoutMs);
 
     try {
-      const res = await fetch(params.url, {
+      const res = await safeFetch(params.url, {
         method: params.method,
         headers: {
           "User-Agent": "Astra-Agent/1.0",

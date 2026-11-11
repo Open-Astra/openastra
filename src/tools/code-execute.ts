@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process";
 import { registerTool } from "./registry.js";
 import { loadEnv } from "../config/env.js";
 import { createLogger } from "../utils/logger.js";
+import { decideExecution, minimalChildEnv } from "./exec-sandbox.js";
 
 const log = createLogger("code-execute");
 
@@ -179,7 +180,7 @@ function executeUnsandboxed(
         {
           timeout: timeoutMs,
           maxBuffer: MAX_OUTPUT * 2,
-          env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "en_US.UTF-8" },
+          env: minimalChildEnv(),
           signal: controller.signal,
         },
         (error, stdout, stderr) => {
@@ -279,6 +280,7 @@ function executeInDocker(
     "--pids-limit=50",
     "--ulimit", "nproc=50:50",
     "--ulimit", "fsize=1048576:1048576",
+    "--user", "65534:65534",
     ...(useStdin ? ["-i"] : []),
     image,
     ...interpreterArgs,
@@ -292,6 +294,8 @@ function executeInDocker(
     let stderr = "";
 
     const child = spawn("docker", dockerArgs, {
+      // The docker CLI itself only needs PATH/HOME — never the gateway's secrets.
+      env: minimalChildEnv(),
       stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
     });
 
@@ -325,9 +329,25 @@ function executeInDocker(
 registerTool({
   name: "code_execute",
   description:
-    "Execute JavaScript (Node.js) or Python code in a sandboxed environment. Returns stdout, stderr, and exit code. Blocks dangerous operations like filesystem access, child process spawning, and network calls. Use for calculations, data processing, algorithm testing, etc.",
+    "Execute JavaScript (Node.js) or Python code in a sandboxed environment. Returns stdout, stderr, and exit code. No network, filesystem or process access. Use for calculations, data processing, algorithm testing, etc. In server mode this is disabled unless the operator enabled the container sandbox.",
   parameters: CodeExecuteParams,
   async execute(params) {
+    // ── Execution gate ─────────────────────────────────────────────
+    // The pattern blocklist below is a courtesy filter, not a sandbox
+    // (`require("child_" + "process")` and `import json, os` pass it). In
+    // server mode code only ever runs inside the container sandbox, and only
+    // when the operator has explicitly enabled the tool.
+    let sandboxSetting: string | undefined;
+    try {
+      sandboxSetting = loadEnv().codeExecSandbox;
+    } catch {
+      sandboxSetting = process.env.CODE_EXEC_SANDBOX;
+    }
+    const decision = decideExecution("code_execute", sandboxSetting);
+    if (!decision.allowed) {
+      return { error: decision.reason };
+    }
+
     const blockedPatterns = params.language === "javascript" ? JS_BLOCKED : PY_BLOCKED;
     for (const pattern of blockedPatterns) {
       if (pattern.test(params.code)) {
@@ -342,7 +362,7 @@ registerTool({
     log.info(`sandbox=${sandbox} language=${params.language} timeout=${timeoutMs}ms`);
 
     let result: ExecResult;
-    if (sandbox === "docker") {
+    if (sandbox === "docker" || decision.container) {
       result = await executeInDocker(params.code, params.language, timeoutMs, env.codeExecMemoryLimitMb, env.codeExecDockerImage);
     } else if (sandbox === "process") {
       result = await executeInProcess(params.code, params.language, timeoutMs);

@@ -42,8 +42,13 @@ export function redactToolResult(content: string): { redacted: string; stats: Re
       piiFound = piiResult.found.length;
     }
   } catch (err) {
-    logger.error("Redaction failed, returning original:", (err as Error).message);
-    // Fail-closed: return original if redaction breaks
+    // Fail closed: if the scanner breaks we cannot vouch for the content, so
+    // it is withheld rather than passed to the model / persisted unredacted.
+    logger.error("Redaction failed, withholding tool output:", (err as Error).message);
+    return {
+      redacted: JSON.stringify({ error: "Tool output withheld: redaction failed" }),
+      stats: { secretsFound: 0, piiFound: 0, totalRedactions: 0 },
+    };
   }
 
   return {

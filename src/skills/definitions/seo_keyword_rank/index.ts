@@ -139,7 +139,7 @@ async function fetchLiveRanking(
     num: "30",
   });
 
-  const response = await safeFetch(`https://serpapi.com/search.json?${params}`, { timeout: 20_000 });
+  const response = await safeFetch(`https://serpapi.com/search.json?${params}`, { timeoutMs: 20_000 });
   const data = await response.json() as Record<string, unknown>;
   const organicResults = (data.organic_results ?? []) as Array<{ position: number; link: string; displayed_link: string }>;
 

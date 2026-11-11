@@ -9,6 +9,8 @@ import { resolveSession, persistMessage } from "../sessions/store.js";
 import { shouldCompact, preCompactionFlush, compactSession } from "../sessions/compaction.js";
 import { assembleContext, trimToolSchemas } from "../context/assembler.js";
 import { getToolSchemas, executeTool } from "../tools/index.js";
+import { redactToolResultObject } from "../tools/result-redactor.js";
+import { wrapUntrustedToolOutput } from "../security/prompt-injection.js";
 import { resolveToolPolicy } from "../tools/types.js";
 import { getEventBus } from "../events/index.js";
 import { emitAgentStarted, emitAgentStreaming, emitToolCallStart, emitToolCallEnd, emitAgentCompleted } from "./lifecycle.js";
@@ -253,7 +255,7 @@ export async function* runAgentLoopStream(
 
     // Semantic cache check — only on first round with no tools (pure chat)
     if (round === 0 && toolSchemas.length === 0 && process.env.SEMANTIC_CACHE_ENABLED === "true") {
-      const cached = await getSemanticCache(userMessage, agentConfig.id).catch(() => null);
+      const cached = await getSemanticCache(userMessage, agentConfig.id, { uid, workspaceId: workspaceId ?? null }).catch(() => null);
       if (cached) {
         yield { type: "stream_delta", content: cached.content };
         yield { type: "inference_done", round, finishReason: "stop", usage: { prompt: 0, completion: 0, total: 0, cached: 0 } };
@@ -457,7 +459,14 @@ export async function* runAgentLoopStream(
       allMessages.push(assistantMsg);
 
       // Execute tools sequentially
-      const toolCtx = { uid, agentId: agentConfig.id, sessionId: session.id, workspaceId, traceId };
+      const toolCtx = {
+        uid,
+        agentId: agentConfig.id,
+        sessionId: session.id,
+        workspaceId,
+        traceId,
+        deniedTools: agentConfig.tools.deny,
+      };
 
       for (const tc of toolCalls) {
         if (signal?.aborted) return;
@@ -499,11 +508,13 @@ export async function* runAgentLoopStream(
         };
 
         const toolStart = Date.now();
-        const result = await executeTool(
+        const rawResult = await executeTool(
           { id: tc.id, name: tc.name, arguments: tc.arguments },
           toolCtx,
           policy.allow,
         );
+        // Redact secrets/PII before the result is streamed, cached or persisted.
+        const { result } = redactToolResultObject(rawResult);
         toolExecutionMs += Date.now() - toolStart;
         allToolResults.push(result);
         // Only cache successful results — caching errors causes the dedup
@@ -546,6 +557,10 @@ export async function* runAgentLoopStream(
             [session.id, tc.id, result.name, result.content],
           ).catch(() => {});
         }
+
+        // Mark external / user-controlled content as untrusted data before it
+        // is fed back to the model (prompt-injection hygiene).
+        persistContent = wrapUntrustedToolOutput(result.name, persistContent);
 
         // Persist tool result
         const toolMsg = await persistMessage(uid, session.id, {
@@ -725,7 +740,7 @@ export async function* runAgentLoopStream(
 
     // Store in semantic cache (fire-and-forget) — only cache clean responses (no tools used)
     if (process.env.SEMANTIC_CACHE_ENABLED === "true" && allToolResults.length === 0) {
-      setSemanticCache(userMessage, revisedContent, agentConfig.id).catch(() => {});
+      setSemanticCache(userMessage, revisedContent, agentConfig.id, { uid, workspaceId: workspaceId ?? null }).catch(() => {});
     }
 
     // Post-turn auto-save (fire-and-forget)

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── get-github-pr ────────────────────────────────────────────────────
 // Fetches pull request details from the GitHub API.
@@ -50,7 +50,7 @@ registerTool({
     }
 
     try {
-      const response = await fetch(prUrl, { headers });
+      const response = await safeFetch(prUrl, { headers });
 
       if (response.status === 404) {
         return { error: `Pull request #${prNumber} not found in ${owner}/${repo}.` };

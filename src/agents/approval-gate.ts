@@ -9,6 +9,7 @@ export async function requestApproval(
   toolName: string,
   args: Record<string, unknown>,
   ctx: { uid: string; agentId: string; sessionId: string; workspaceId?: string },
+  opts: { timeoutMs?: number } = {},
 ): Promise<boolean> {
   // Only auto-approve in standalone CLI mode — server mode always requires
   // human review regardless of workspace context to prevent header-omission bypass.
@@ -17,11 +18,23 @@ export async function requestApproval(
   const id = randomUUID();
   const pool = getPool();
 
-  await pool.query(
-    `INSERT INTO approval_requests (id, workspace_id, session_id, agent_id, uid, tool_name, tool_args)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [id, ctx.workspaceId, ctx.sessionId, ctx.agentId, ctx.uid, toolName, JSON.stringify(args)],
-  );
+  const timeoutMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 30_000;
+
+  // user_id and action are NOT NULL in the base table (migration 013); uid /
+  // tool_name / tool_args were added in 048. Populate both generations so the
+  // row is visible to every approvals API. If the request cannot be recorded
+  // nobody can approve it, so the tool call is rejected (fail closed).
+  try {
+    await pool.query(
+      `INSERT INTO approval_requests
+         (id, workspace_id, session_id, agent_id, user_id, uid, action, tool_name, tool_args, status, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $5, $6, $6, $7, 'pending', NOW() + ($8::double precision / 1000) * INTERVAL '1 second')`,
+      [id, ctx.workspaceId ?? null, ctx.sessionId, ctx.agentId, ctx.uid, toolName, JSON.stringify(args), timeoutMs],
+    );
+  } catch (err) {
+    log.error(`Could not record approval request for tool=${toolName}: ${(err as Error).message}`);
+    return false;
+  }
 
   getEventBus().emit("approval.requested" as any, {
     approvalId: id,
@@ -36,8 +49,8 @@ export async function requestApproval(
 
   log.info(`Approval requested id=${id} tool=${toolName} uid=${ctx.uid}`);
 
-  // Poll for approval (30 second timeout, 1 second interval)
-  const timeout = Date.now() + 30_000;
+  // Poll for approval (1 second interval)
+  const timeout = Date.now() + timeoutMs;
   while (Date.now() < timeout) {
     await new Promise((r) => setTimeout(r, 1000));
     const result = await pool.query<{ status: string }>(
@@ -49,7 +62,7 @@ export async function requestApproval(
       getEventBus().emit("approval.resolved" as any, { approvalId: id, status: "approved", timestamp: Date.now() });
       return true;
     }
-    if (status === "rejected") {
+    if (status === "rejected" || status === "denied" || status === "expired") {
       getEventBus().emit("approval.resolved" as any, { approvalId: id, status: "rejected", timestamp: Date.now() });
       return false;
     }

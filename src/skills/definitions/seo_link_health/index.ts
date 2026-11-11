@@ -66,7 +66,7 @@ const seoLinkHealthSkill: SkillDefinition = {
 
           let html: string;
           try {
-            const response = await safeFetch(currentUrl, { timeout });
+            const response = await safeFetch(currentUrl, { timeoutMs: timeout });
             html = await response.text();
           } catch {
             continue;
@@ -170,7 +170,7 @@ function isInternalLink(href: string, baseHost: string): boolean {
 
 async function checkLink(url: string, timeout: number): Promise<{ status: number | null; redirect?: string; error?: string }> {
   try {
-    const response = await safeFetch(url, { method: "HEAD", timeout, redirect: "manual" });
+    const response = await safeFetch(url, { method: "HEAD", timeoutMs: timeout, redirect: "manual" });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
       return { status: response.status, redirect: location ?? undefined };
@@ -179,7 +179,7 @@ async function checkLink(url: string, timeout: number): Promise<{ status: number
   } catch (err) {
     // Try GET if HEAD fails
     try {
-      const response = await safeFetch(url, { timeout, redirect: "manual" });
+      const response = await safeFetch(url, { timeoutMs: timeout, redirect: "manual" });
       return { status: response.status };
     } catch (err2) {
       return { status: null, error: err2 instanceof Error ? err2.message : String(err2) };

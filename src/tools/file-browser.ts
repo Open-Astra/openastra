@@ -2,6 +2,7 @@ import { z } from "zod";
 import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { registerTool } from "./registry.js";
+import { guardPath, isSecretPath, type PathAccess } from "./path-guard.js";
 
 // ── File Browser Tools ──────────────────────────────────────────────
 // Three tools for listing, reading, and writing files within the CWD.
@@ -10,14 +11,11 @@ import { registerTool } from "./registry.js";
 
 const MAX_FILE_BYTES = 1_048_576; // 1 MB
 
-function safePath(inputPath: string): string {
-  const cwd = process.cwd();
-  const resolved = resolve(cwd, inputPath);
-  // Allow exactly cwd itself or anything underneath it
-  if (resolved !== cwd && !resolved.startsWith(cwd + "/") && !resolved.startsWith(cwd + "\\")) {
-    throw new Error(`Path traversal denied: "${inputPath}" resolves outside the working directory`);
-  }
-  return resolved;
+// Containment, symlink resolution, the secrets blocklist (.env*, keys), the
+// per-agent fileAccess restriction and the server-mode protected-write list
+// are all enforced by the shared path guard.
+function safePath(inputPath: string, access: PathAccess, agentId?: string): string {
+  return guardPath(inputPath, { access, agentId });
 }
 
 // ── Simple glob → regex converter ───────────────────────────────────
@@ -44,10 +42,10 @@ registerTool({
   name: "file-list",
   description: "List files and directories in a given path. Optionally filter by glob pattern. Restricted to the process working directory.",
   parameters: FileListParams,
-  async execute(params, _ctx) {
+  async execute(params, ctx) {
     let safe: string;
     try {
-      safe = safePath(params.path);
+      safe = safePath(params.path, "list", ctx?.agentId);
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -66,6 +64,8 @@ registerTool({
 
     for (const entry of entries) {
       if (patternRe && !patternRe.test(entry.name)) continue;
+      // Do not advertise secret material in listings.
+      if (isSecretPath(resolve(safe, entry.name))) continue;
       if (entry.isDirectory()) {
         dirs.push(entry.name);
       } else {
@@ -88,10 +88,10 @@ registerTool({
   name: "file-fetch",
   description: "Read the contents of a file. Limited to 1 MB. Restricted to the process working directory.",
   parameters: FileFetchParams,
-  async execute(params, _ctx) {
+  async execute(params, ctx) {
     let safe: string;
     try {
-      safe = safePath(params.path);
+      safe = safePath(params.path, "read", ctx?.agentId);
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -128,10 +128,10 @@ registerTool({
   name: "file-write",
   description: "Write content to a file, creating parent directories as needed. Restricted to the process working directory.",
   parameters: FileWriteParams,
-  async execute(params, _ctx) {
+  async execute(params, ctx) {
     let safe: string;
     try {
-      safe = safePath(params.path);
+      safe = safePath(params.path, "write", ctx?.agentId);
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
     }

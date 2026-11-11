@@ -35,6 +35,22 @@ export interface McpToolDescriptor {
   inputSchema: Record<string, unknown>;
 }
 
+// ── Child Environment ───────────────────────────────────────────────
+
+const MCP_BASE_ENV_KEYS = [
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ", "TMPDIR", "TEMP", "TMP",
+  "SystemRoot", "ComSpec", "PATHEXT", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "NODE_EXTRA_CA_CERTS",
+];
+
+export function buildMcpChildEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of MCP_BASE_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return { ...env, ...(extra ?? {}) };
+}
+
 // ── MCP Client Manager ──────────────────────────────────────────────
 
 class McpClientManager {
@@ -54,9 +70,10 @@ class McpClientManager {
       transport = new StdioClientTransport({
         command: config.command,
         args: config.args,
-        env: config.env
-          ? { ...process.env, ...config.env } as Record<string, string>
-          : undefined,
+        // MCP stdio servers are third-party processes: they get a minimal
+        // base environment plus only what the operator listed for them —
+        // never the gateway's provider keys, JWT secret or DB password.
+        env: buildMcpChildEnv(config.env),
       });
     } else {
       const url = new URL(config.url);

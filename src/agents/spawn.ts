@@ -6,6 +6,20 @@ import { getAgentConfig } from "../config/agents.js";
 import { runAgentLoop, type AgentResponse } from "./loop.js";
 import { logAgentAction } from "./audit.js";
 import { getBus, type SpawnTaskMessage, type TaskResultMessage } from "./pubsub.js";
+import {
+  getExecutionPolicy,
+  runWithExecutionPolicy,
+  normalizeToolName,
+  normalizeToolSet,
+} from "../tools/policy.js";
+
+// Absolute ceiling on spawn nesting, regardless of per-agent maxDepth.
+export const HARD_MAX_SPAWN_DEPTH = 3;
+
+export interface SpawnOptions {
+  /** Workspace of the parent request — the child runs in the same workspace. */
+  workspaceId?: string;
+}
 
 // ── Spawn Errors ───────────────────────────────────────────────────
 
@@ -53,7 +67,14 @@ export async function spawnAgent(
   uid: string,
   inferenceClient: InferenceClient,
   depth: number = 1,
+  options: SpawnOptions = {},
 ): Promise<SpawnResult> {
+  // Depth is tracked on the execution chain, not trusted from the caller: a
+  // child that spawns again is one level deeper than the chain it runs in.
+  const chain = getExecutionPolicy();
+  depth = Math.max(depth, (chain?.spawnDepth ?? 0) + 1);
+  const workspaceId = options.workspaceId ?? chain?.workspaceId;
+
   const taskId = randomUUID();
   const start = Date.now();
   const bus = getBus();
@@ -74,7 +95,7 @@ export async function spawnAgent(
     );
   }
 
-  if (depth >= parentConfig.spawn.maxDepth) {
+  if (depth > HARD_MAX_SPAWN_DEPTH || depth >= parentConfig.spawn.maxDepth) {
     throw new SpawnError(
       `Spawn depth ${depth} exceeds max depth ${parentConfig.spawn.maxDepth} for ${parentConfig.id}`,
       "DEPTH_EXCEEDED",
@@ -98,7 +119,17 @@ export async function spawnAgent(
   // Skills are also restricted: only skills whose tools are ALL within
   // the parent's effective allow set are inherited.
 
-  const parentAllowSet = new Set(parentConfig.tools.allow);
+  // The parent's *effective* permissions are whatever the running chain
+  // allows (already narrowed by earlier spawns); fall back to its config
+  // when called outside a tool execution (e.g. gRPC).
+  const parentDeny = normalizeToolSet([...(chain?.deny ?? []), ...parentConfig.tools.deny]);
+  const parentAllowNorm = chain
+    ? new Set(chain.allow)
+    : normalizeToolSet(parentConfig.tools.allow);
+  for (const d of parentDeny) parentAllowNorm.delete(d);
+  const parentAllowSet = {
+    has: (tool: string): boolean => parentAllowNorm.has(normalizeToolName(tool)),
+  };
   const restrictedAllow = targetConfig.tools.allow.filter((tool) =>
     parentAllowSet.has(tool),
   );
@@ -121,7 +152,8 @@ export async function spawnAgent(
     skills: restrictedSkills,
     tools: {
       allow: restrictedAllow,
-      deny: targetConfig.tools.deny,
+      // Parent denies propagate to the child — deny always wins.
+      deny: [...new Set([...targetConfig.tools.deny, ...parentConfig.tools.deny, ...(chain?.deny ?? [])])],
       maxToolCallsPerRound: targetConfig.tools.maxToolCallsPerRound,
     },
   };
@@ -164,12 +196,33 @@ export async function spawnAgent(
       `[spawn] ${parentConfig.id} -> ${targetAgentId} | task=${taskId} depth=${depth}`,
     );
 
-    response = await runAgentLoop(
-      uid,
-      task,
-      restrictedConfig,
-      inferenceClient,
-      sessionKey,
+    const childPolicy = {
+      allow: normalizeToolSet(restrictedAllow.concat(
+        // skill tools of the retained skills were already checked against the parent
+        await (async () => {
+          try {
+            const { getSkillToolNames } = await import("../skills/registry.js");
+            return getSkillToolNames(restrictedSkills);
+          } catch {
+            return [] as string[];
+          }
+        })(),
+      )),
+      deny: normalizeToolSet(restrictedConfig.tools.deny),
+      spawnDepth: depth,
+      workspaceId,
+    };
+    for (const d of childPolicy.deny) childPolicy.allow.delete(d);
+
+    response = await runWithExecutionPolicy(childPolicy, () =>
+      runAgentLoop(
+        uid,
+        task,
+        restrictedConfig,
+        inferenceClient,
+        sessionKey,
+        workspaceId,
+      ),
     );
   } catch (err) {
     const durationMs = Date.now() - start;

@@ -11,6 +11,7 @@ import { shouldCompact, preCompactionFlush, compactSession } from "../sessions/c
 import { assembleContext, trimToolSchemas } from "../context/assembler.js";
 import { getToolSchemas, executeTool } from "../tools/index.js";
 import { redactToolResults } from "../tools/result-redactor.js";
+import { wrapUntrustedToolOutput } from "../security/prompt-injection.js";
 import { resolveToolPolicy } from "../tools/types.js";
 import { getEventBus } from "../events/index.js";
 import { emitAgentStarted, emitToolCallStart, emitToolCallEnd, emitAgentCompleted } from "./lifecycle.js";
@@ -21,7 +22,7 @@ import { graphSearch } from "../memory/graph.js";
 import { reinforceEntity } from "../memory/auto-extract.js";
 import { getPool } from "../config/postgres.js";
 import { shouldReflect, reflectOnResponse } from "./reflection.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 import { AgentTracer } from "./tracer.js";
 import { getAgentProfile } from "../memory/profiles.js";
 import { writeInferencePayload } from "../inference/payload-audit.js";
@@ -58,7 +59,7 @@ const logger = createLogger("agent-loop");
 async function fireSessionWebhook(webhookUrl: string | undefined, payload: Record<string, unknown>): Promise<void> {
   if (!webhookUrl) return;
   if (await isBlockedUrl(webhookUrl)) return;
-  fetch(webhookUrl, {
+  safeFetch(webhookUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", "User-Agent": "Astra-Session-Webhook/1.0" },
     body: JSON.stringify({ event: "agent.turn.completed", ...payload }),
@@ -333,7 +334,7 @@ export async function runAgentLoop(
 
     // Semantic cache check — only on first round with no tools (pure chat)
     if (round === 0 && toolSchemas.length === 0 && process.env.SEMANTIC_CACHE_ENABLED === "true") {
-      const cached = await getSemanticCache(userMessage, agentConfig.id).catch(() => null);
+      const cached = await getSemanticCache(userMessage, agentConfig.id, { uid, workspaceId: workspaceId ?? null }).catch(() => null);
       if (cached) {
         await persistMessage(uid, session.id, {
           role: "assistant",
@@ -466,6 +467,7 @@ export async function runAgentLoop(
         workspaceId,
         traceId,
         metadata: { userRole: "tool_runner" }, // default role; can be overridden by auth
+        deniedTools: agentConfig.tools.deny,
       };
 
       // Feature 14: Evaluate skill conditions before executing tools
@@ -664,6 +666,10 @@ export async function runAgentLoop(
             [session.id, tc.id, redactedResult.name, redactedResult.content],
           ).catch(() => {});
         }
+
+        // Mark external / user-controlled content as untrusted data before it
+        // is fed back to the model (prompt-injection hygiene).
+        persistContent = wrapUntrustedToolOutput(redactedResult.name, persistContent);
 
         const toolMsg = await persistMessage(uid, session.id, {
           role: "tool",
@@ -865,7 +871,7 @@ export async function runAgentLoop(
 
     // Store in semantic cache (fire-and-forget) — only cache clean responses (no tools used)
     if (process.env.SEMANTIC_CACHE_ENABLED === "true" && allToolResults.length === 0) {
-      setSemanticCache(userMessage, revisedContent, agentConfig.id).catch(() => {});
+      setSemanticCache(userMessage, revisedContent, agentConfig.id, { uid, workspaceId: workspaceId ?? null }).catch(() => {});
     }
 
     // 7. Post-turn auto-save — extract key facts from user message + response
