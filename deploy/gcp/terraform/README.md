@@ -30,19 +30,32 @@ gcloud auth application-default login
 # Initialize providers
 terraform init
 
-# Review plan
+# Provide secrets via the environment (not -var flags, which leak into
+# shell history and the process list)
+export TF_VAR_db_password="$(openssl rand -hex 24)"
+export TF_VAR_jwt_secret="$(openssl rand -hex 32)"
+export TF_VAR_typesense_api_key="$(openssl rand -hex 24)"
+export TF_VAR_internal_api_key="$(openssl rand -hex 32)"
+read -rs TF_VAR_llm_api_key && export TF_VAR_llm_api_key
+
+# Review plan, then apply (~15 minutes for first deploy)
 terraform plan \
   -var="project_id=your-gcp-project-id" \
-  -var="gateway_image=us-central1-docker.pkg.dev/your-project/astra-images/gateway:latest" \
-  -var="db_password=your-secure-password" \
-  -var="jwt_secret=your-jwt-secret" \
-  -var="typesense_api_key=your-typesense-key" \
-  -var="internal_api_key=your-internal-key" \
-  -var="llm_api_key=your-llm-key"
-
-# Apply (~15 minutes for first deploy)
-terraform apply -var="project_id=your-gcp-project-id" # ... same vars
+  -var="gateway_image=us-central1-docker.pkg.dev/your-project/astra-images/gateway:0.1.0"
+terraform apply \
+  -var="project_id=your-gcp-project-id" \
+  -var="gateway_image=us-central1-docker.pkg.dev/your-project/astra-images/gateway:0.1.0"
 ```
+
+### Security notes
+
+- **State holds secrets in plaintext.** Configure the GCS backend stub in
+  `main.tf` and never commit `terraform.tfstate` or `terraform.tfvars`.
+- Secrets live in Secret Manager. The gateway and the Typesense VM each use
+  a dedicated service account with access to only the secrets they need;
+  nothing secret is placed in instance metadata.
+- Cloud Run terminates TLS; the Typesense VM and Cloud SQL have no public IP.
+  Outbound traffic leaves through Cloud NAT.
 
 Or use a `terraform.tfvars` file:
 ```hcl

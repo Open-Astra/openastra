@@ -14,6 +14,8 @@
 #   4. Optional: channel tokens (TELEGRAM_BOT_TOKEN, etc.)
 #
 # The gateway will REFUSE to start in production with placeholder values.
+# The same TYPESENSE_API_KEY value must be set on BOTH the gateway and the
+# typesense component.
 
 name: astra
 
@@ -22,9 +24,14 @@ region: nyc
 services:
   - name: gateway
     github:
-      repo: Contra-Collective/openastra
+      # Canonical upstream. Point this at YOUR fork if you want to control
+      # exactly what runs with your keys.
+      repo: Open-Astra/openastra
       branch: main
-      deploy_on_push: true
+      # Off by default: auto-deploying every upstream push means whoever can
+      # push to that repo can run code with your secrets. Enable only for a
+      # repo you control.
+      deploy_on_push: false
     dockerfile_path: Dockerfile
     http_port: 8080
     instance_count: 1
@@ -94,6 +101,14 @@ services:
 
   # ── Typesense Worker ───────────────────────────────────────────
   # Runs Typesense as an internal worker (not publicly exposed).
+  #
+  # WARNING — NO PERSISTENCE: App Platform has no persistent volumes, so
+  # /data is ephemeral and the search index is LOST on every redeploy or
+  # restart. Postgres remains the source of truth, but Typesense-backed
+  # memory search returns nothing until the index is rebuilt. For anything
+  # beyond a demo, run Typesense on a Droplet with a block-storage volume
+  # (see deploy/do/terraform) or use Typesense Cloud, and point
+  # TYPESENSE_HOST/TYPESENSE_NODES at it instead of this worker.
   - name: typesense
     image:
       registry_type: DOCKER_HUB

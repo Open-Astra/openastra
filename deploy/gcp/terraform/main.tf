@@ -10,6 +10,17 @@ terraform {
       version = "~> 3.0"
     }
   }
+
+  # ── Remote state (strongly recommended) ──────────────────────────
+  # Terraform state contains every secret passed in via variables in
+  # PLAINTEXT. Without a backend block that state is a local
+  # terraform.tfstate file. Uncomment and point at a private, versioned GCS
+  # bucket (ideally with CMEK) before applying for real:
+  #
+  # backend "gcs" {
+  #   bucket = "my-org-terraform-state"
+  #   prefix = "astra"
+  # }
 }
 
 provider "google" {

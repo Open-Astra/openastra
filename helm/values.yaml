@@ -6,10 +6,15 @@
 replicaCount: 1
 
 image:
-  # -- Container image repository.
+  # -- Container image repository. No public image is published yet — build
+  # the repo's Dockerfile and push it to your own registry, then set this.
   repository: openastra/gateway
-  # -- Image tag. Defaults to the chart's appVersion when set to "".
-  tag: "latest"
+  # -- Image tag. Defaults to the chart's appVersion when "". Never use a
+  # floating tag such as "latest": with IfNotPresent, nodes would silently
+  # run different builds. Prefer an immutable version tag or set `digest`.
+  tag: ""
+  # -- Optional image digest (sha256:...). Takes precedence over tag.
+  digest: ""
   # -- Image pull policy.
   pullPolicy: IfNotPresent
 
@@ -42,15 +47,19 @@ podSecurityContext:
   runAsUser: 1000
   runAsGroup: 1000
   fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
 # ── Container Security Context ────────────────────────────────────────────────
 securityContext:
   runAsNonRoot: true
   runAsUser: 1000
-  # readOnlyRootFilesystem is false because the app writes to /tmp.
-  # A tmpfs volume is mounted at /tmp instead (see volumes below).
-  readOnlyRootFilesystem: false
+  # The root filesystem is read-only; the deployment mounts an in-memory
+  # emptyDir at /tmp for anything the app needs to write.
+  readOnlyRootFilesystem: true
   allowPrivilegeEscalation: false
+  seccompProfile:
+    type: RuntimeDefault
   capabilities:
     drop:
       - ALL
@@ -115,12 +124,40 @@ autoscaling:
 
 # ── Pod Disruption Budget ─────────────────────────────────────────────────────
 podDisruptionBudget:
-  # -- Enable PodDisruptionBudget.
+  # -- Enable PodDisruptionBudget. The PDB is only rendered when at least two
+  # replicas run (replicaCount >= 2, or autoscaling.minReplicas >= 2): with a
+  # single replica any budget would block node drains indefinitely.
   enabled: true
-  # -- Minimum number of pods that must be available during disruptions.
-  # Use a string for percentage ("50%") or integer for absolute count.
-  minAvailable: 1
-  # maxUnavailable: 1
+  # -- Maximum pods that may be unavailable during a voluntary disruption.
+  maxUnavailable: 1
+  # -- Alternative: minimum pods that must stay available (integer or "50%").
+  # When set it takes precedence over maxUnavailable.
+  minAvailable: ""
+
+# ── Network Policy ────────────────────────────────────────────────────────────
+networkPolicy:
+  # -- Render a NetworkPolicy restricting gateway traffic. Requires a CNI that
+  # enforces NetworkPolicy (Calico, Cilium, ...); otherwise it is a no-op.
+  enabled: true
+  # -- Sources allowed to reach the gateway port. Empty list = any pod in any
+  # namespace (and node-local traffic such as kubelet probes). Tighten to your
+  # ingress controller, e.g.:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: ingress-nginx
+  ingressFrom: []
+  egress:
+    # -- Allow DNS lookups (UDP/TCP 53) to any destination.
+    allowDNS: true
+    # -- TCP ports the gateway may connect out to, to any address except
+    # `exceptCidrs`. 443 covers LLM provider APIs; the PostgreSQL and
+    # Typesense ports from the sections below are added automatically.
+    ports: [443]
+    # -- CIDRs excluded from the egress allowance (cloud metadata endpoint).
+    exceptCidrs:
+      - 169.254.169.254/32
+    # -- Extra raw NetworkPolicy egress rules appended verbatim.
+    extra: []
 
 # ── Probes ────────────────────────────────────────────────────────────────────
 livenessProbe:
@@ -153,12 +190,18 @@ secret:
   # -- When true, the chart renders a Kubernetes Secret from the values below.
   # Set to false and supply your own Secret (or use External Secrets Operator)
   # when secrets are managed outside Helm.
+  # When true, jwtSecret, internalApiKey, typesenseApiKey and
+  # postgres.password are REQUIRED — the chart refuses to render with empty
+  # values rather than deploying a gateway with blank secrets.
+  # When false, the Secret named below must contain the keys JWT_SECRET,
+  # INTERNAL_API_KEY, TYPESENSE_API_KEY and PG_PASSWORD (k8s/external-secrets.yaml
+  # produces exactly these).
   create: true
   # -- Name of the Secret. Defaults to "<fullname>-secrets" when empty.
   name: ""
-  # -- Core application secrets. All values must be base64-encoded strings,
-  # OR use the `stringData` approach (the template uses stringData so plain
-  # text values are safe here — Kubernetes encodes them at apply time).
+  # -- Core application secrets (plain text; the template uses stringData).
+  # Supply with --set / a private values file — never commit real values.
+  # Generate: openssl rand -hex 32
   jwtSecret: ""
   internalApiKey: ""
   typesenseApiKey: ""
@@ -224,8 +267,9 @@ topologySpreadConstraints: []
 #       app.kubernetes.io/name: openastra
 
 # ── Volumes / Volume Mounts ───────────────────────────────────────────────────
-# The deployment always mounts a tmpfs at /tmp.
-# Add extra volumes here (e.g. ConfigMaps for astra.yml).
+# The deployment always mounts an in-memory emptyDir at /tmp.
+# The image bakes in astra.yml, prompts/ and SOUL.md; add extra volumes here
+# to override them (e.g. a ConfigMap for astra.yml).
 extraVolumes: []
 # - name: astra-config
 #   configMap:

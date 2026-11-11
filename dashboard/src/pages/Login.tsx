@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Zap, Lock, Mail, Loader2, AlertCircle, Rocket } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
+import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export function LoginPage() {
@@ -29,7 +30,13 @@ export function LoginPage() {
       await login(email, password);
       navigate(redirectTo, { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      if (err instanceof ApiError && (err.status === 401 || err.status === 400)) {
+        setError("Invalid email or password");
+      } else if (err instanceof ApiError && err.status === 429) {
+        setError("Too many attempts. Please wait and try again.");
+      } else {
+        setError("Could not sign in — the gateway is unreachable or returned an error.");
+      }
     } finally {
       setLoading(false);
     }
@@ -123,6 +130,9 @@ export function LoginPage() {
             Sign in
           </button>
 
+          {/* Dev login — only exists in `npm run dev`; stripped from production builds */}
+          {import.meta.env.DEV && (
+          <>
           {/* Divider */}
           <div className="relative">
             <div className="absolute inset-0 flex items-center">
@@ -142,6 +152,8 @@ export function LoginPage() {
             <Rocket className="h-3 w-3" />
             Continue in dev mode (no auth)
           </button>
+          </>
+          )}
         </form>
 
         <p className="mt-4 text-center text-[10px] text-zinc-600">

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 
 export interface AuthUser {
   email: string;
@@ -14,11 +14,13 @@ interface AuthStore {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   init: () => Promise<void>;
+  /** Local development only — a no-op in production builds. */
   devLogin: () => void;
 }
 
 const TOKEN_KEY = "astra_token";
 const USER_KEY = "astra_user";
+const DEV_TOKEN_PREFIX = "dev-";
 
 function loadPersisted(): { token: string | null; user: AuthUser | null } {
   const token = localStorage.getItem(TOKEN_KEY);
@@ -34,34 +36,56 @@ function loadPersisted(): { token: string | null; user: AuthUser | null } {
   return { token, user };
 }
 
+function clearPersisted(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+/** True when `token` is a structurally valid, unexpired JWT. */
+function isUnexpiredJwt(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(
+      atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/")),
+    ) as { exp?: number };
+    return typeof payload.exp === "number" && payload.exp * 1000 > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+/** Mock tokens are only ever honoured by the Vite dev server build. */
+function isDevToken(token: string | null): boolean {
+  return import.meta.env.DEV && Boolean(token?.startsWith(DEV_TOKEN_PREFIX));
+}
+
 export const useAuthStore = create<AuthStore>((set) => {
   const { token, user } = loadPersisted();
 
   return {
     token,
     user,
-    isAuthenticated: Boolean(token),
+    // Never assume a persisted token is good — init() verifies it first.
+    isAuthenticated: false,
     isInitializing: true,
 
+    // Throws on failure (bad credentials, gateway unreachable, …). There is
+    // deliberately no fallback: a failed login must never produce a session.
     login: async (email, password) => {
-      try {
-        const { token: newToken } = await api.auth.login({ email, password });
-        const newUser: AuthUser = { email };
-        localStorage.setItem(TOKEN_KEY, newToken);
-        localStorage.setItem(USER_KEY, JSON.stringify(newUser));
-        set({ token: newToken, user: newUser, isAuthenticated: true });
-      } catch {
-        // Dev fallback — let the user in if backend is unreachable
-        const mockToken = `dev-${Date.now()}`;
-        const newUser: AuthUser = { email, displayName: email.split("@")[0] };
-        localStorage.setItem(TOKEN_KEY, mockToken);
-        localStorage.setItem(USER_KEY, JSON.stringify(newUser));
-        set({ token: mockToken, user: newUser, isAuthenticated: true });
-      }
+      const res = await api.auth.login({ email, password });
+      const newUser: AuthUser = {
+        email: res.user?.email ?? email,
+        displayName: res.user?.displayName ?? undefined,
+      };
+      localStorage.setItem(TOKEN_KEY, res.accessToken);
+      localStorage.setItem(USER_KEY, JSON.stringify(newUser));
+      set({ token: res.accessToken, user: newUser, isAuthenticated: true });
     },
 
     devLogin: () => {
-      const mockToken = `dev-${Date.now()}`;
+      if (!import.meta.env.DEV) return;
+      const mockToken = `${DEV_TOKEN_PREFIX}${Date.now()}`;
       const newUser: AuthUser = { email: "dev@openastra.local", displayName: "dev" };
       localStorage.setItem(TOKEN_KEY, mockToken);
       localStorage.setItem(USER_KEY, JSON.stringify(newUser));
@@ -69,29 +93,43 @@ export const useAuthStore = create<AuthStore>((set) => {
     },
 
     logout: () => {
-      localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(USER_KEY);
+      clearPersisted();
       set({ token: null, user: null, isAuthenticated: false });
     },
 
     init: async () => {
-      const { token } = loadPersisted();
-      if (!token) {
-        set({ isInitializing: false });
+      const { token: stored, user: storedUser } = loadPersisted();
+      if (!stored) {
+        set({ token: null, user: null, isAuthenticated: false, isInitializing: false });
         return;
       }
-      try {
-        const { valid } = await api.auth.verify();
-        if (!valid) {
-          localStorage.removeItem(TOKEN_KEY);
-          localStorage.removeItem(USER_KEY);
-          set({ token: null, user: null, isAuthenticated: false, isInitializing: false });
-          return;
-        }
-      } catch {
-        // Backend unreachable — trust persisted token (dev mode)
+
+      if (isDevToken(stored)) {
+        set({ token: stored, user: storedUser, isAuthenticated: true, isInitializing: false });
+        return;
       }
-      set({ isInitializing: false });
+
+      // Malformed, expired, or leftover mock tokens are discarded outright.
+      if (!isUnexpiredJwt(stored)) {
+        clearPersisted();
+        set({ token: null, user: null, isAuthenticated: false, isInitializing: false });
+        return;
+      }
+
+      try {
+        await api.auth.checkSession();
+        set({ token: stored, user: storedUser, isAuthenticated: true, isInitializing: false });
+      } catch (err) {
+        // Verification failed — do NOT trust the persisted token. A definite
+        // rejection clears it; if the gateway was merely unreachable the token
+        // is kept on disk so a later reload can re-verify, but the user is
+        // not treated as signed in.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          clearPersisted();
+          set({ token: null, user: null });
+        }
+        set({ isAuthenticated: false, isInitializing: false });
+      }
     },
   };
 });

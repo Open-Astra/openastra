@@ -41,6 +41,28 @@ variable "ssh_key_fingerprints" {
   type        = list(string)
 }
 
+# --- Network access (no defaults: you must choose who can connect) ---
+
+variable "ssh_allowed_cidrs" {
+  description = "CIDRs allowed to SSH to the Droplet, e.g. [\"203.0.113.4/32\"]. Deliberately has no default."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.ssh_allowed_cidrs) > 0 && !contains(var.ssh_allowed_cidrs, "0.0.0.0/0") && !contains(var.ssh_allowed_cidrs, "::/0")
+    error_message = "ssh_allowed_cidrs must list specific CIDRs; SSH may not be opened to the whole internet."
+  }
+}
+
+variable "gateway_allowed_cidrs" {
+  description = "CIDRs allowed to reach the gateway on :8080 (plain HTTP). Use your load balancer / reverse proxy / office range. Passing [\"0.0.0.0/0\", \"::/0\"] exposes unencrypted HTTP to the internet and must be an explicit choice. Deliberately has no default."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.gateway_allowed_cidrs) > 0
+    error_message = "gateway_allowed_cidrs must contain at least one CIDR."
+  }
+}
+
 variable "gateway_image" {
   description = "Docker image for the gateway (e.g. registry.digitalocean.com/astra/gateway:latest)"
   type        = string

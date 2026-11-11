@@ -4,6 +4,7 @@ import { Topbar } from "./Topbar";
 import { MobileNav } from "./MobileNav";
 import { useAppStore } from "@/stores/app";
 import { cn } from "@/lib/utils";
+import { DemoBanner } from "@/components/DemoOnly";
 
 export function Layout() {
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
@@ -22,6 +23,7 @@ export function Layout() {
           sidebarOpen ? "md:ml-64" : "md:ml-16",
         )}
       >
+        <DemoBanner />
         <Topbar />
         <main className="flex-1 overflow-y-auto p-4 pb-20 md:p-6 md:pb-6">
           <Outlet />

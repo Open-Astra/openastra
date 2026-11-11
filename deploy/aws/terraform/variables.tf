@@ -52,9 +52,15 @@ variable "max_capacity" {
 }
 
 variable "certificate_arn" {
-  description = "ACM certificate ARN for HTTPS (leave empty to use HTTP only)"
+  description = "ACM certificate ARN for the HTTPS listener. Required unless allow_insecure_http = true."
   type        = string
   default     = ""
+}
+
+variable "allow_insecure_http" {
+  description = "Explicit opt-out of TLS: serve the gateway over plain HTTP when no certificate_arn is set. JWTs and API keys then cross the internet in cleartext — only for throwaway test stacks."
+  type        = bool
+  default     = false
 }
 
 variable "db_password" {

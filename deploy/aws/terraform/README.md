@@ -17,6 +17,20 @@ Internet → ALB (HTTP/HTTPS)
 - [Terraform](https://www.terraform.io/downloads) >= 1.5
 - Docker image built and pushed to ECR or Docker Hub
 
+## Security notes — read before applying
+
+- **HTTPS is required.** `certificate_arn` must be set; the plan fails
+  otherwise. To deliberately run a throwaway stack over plain HTTP, set
+  `allow_insecure_http = true`.
+- **State holds secrets in plaintext.** Every `sensitive` variable ends up in
+  Terraform state. Configure the S3 backend stub in `main.tf` (encrypted,
+  versioned, access-controlled bucket) and never commit `terraform.tfstate`
+  or `terraform.tfvars`.
+- **Do not pass secrets with `-var` on the command line** — they land in shell
+  history and the process list. Use `TF_VAR_*` environment variables or a
+  git-ignored `terraform.tfvars`.
+- Generate secrets with `openssl rand -hex 32`; do not reuse values.
+
 ## Deploy
 
 ```bash
@@ -25,28 +39,26 @@ cd deploy/aws/terraform
 # Initialize providers
 terraform init
 
-# Review plan
-terraform plan \
-  -var="gateway_image=your-account.dkr.ecr.us-east-1.amazonaws.com/astra:latest" \
-  -var="db_password=your-secure-password" \
-  -var="jwt_secret=your-jwt-secret" \
-  -var="typesense_api_key=your-typesense-key" \
-  -var="internal_api_key=your-internal-key" \
-  -var="llm_api_key=your-llm-key"
+# Provide secrets via the environment (not -var flags)
+export TF_VAR_db_password="$(openssl rand -hex 24)"
+export TF_VAR_jwt_secret="$(openssl rand -hex 32)"
+export TF_VAR_typesense_api_key="$(openssl rand -hex 24)"
+export TF_VAR_internal_api_key="$(openssl rand -hex 32)"
+read -rs TF_VAR_llm_api_key && export TF_VAR_llm_api_key
 
-# Apply (creates all resources, ~10 minutes)
+# Review plan, then apply (creates all resources, ~10 minutes)
+terraform plan \
+  -var="gateway_image=your-account.dkr.ecr.us-east-1.amazonaws.com/astra:0.1.0" \
+  -var="certificate_arn=arn:aws:acm:us-east-1:<account>:certificate/<id>"
 terraform apply \
-  -var="gateway_image=your-account.dkr.ecr.us-east-1.amazonaws.com/astra:latest" \
-  -var="db_password=your-secure-password" \
-  -var="jwt_secret=your-jwt-secret" \
-  -var="typesense_api_key=your-typesense-key" \
-  -var="internal_api_key=your-internal-key" \
-  -var="llm_api_key=your-llm-key"
+  -var="gateway_image=your-account.dkr.ecr.us-east-1.amazonaws.com/astra:0.1.0" \
+  -var="certificate_arn=arn:aws:acm:us-east-1:<account>:certificate/<id>"
 ```
 
 Or use a `terraform.tfvars` file:
 ```hcl
-gateway_image     = "your-account.dkr.ecr.us-east-1.amazonaws.com/astra:latest"
+gateway_image     = "your-account.dkr.ecr.us-east-1.amazonaws.com/astra:0.1.0"
+certificate_arn   = "arn:aws:acm:us-east-1:<account>:certificate/<id>"
 db_password       = "your-secure-password"
 jwt_secret        = "your-jwt-secret"
 typesense_api_key = "your-typesense-key"
@@ -83,11 +95,11 @@ aws ecs update-service \
   --region us-east-1
 ```
 
-## Enable HTTPS
+## HTTPS
 
 1. Request a certificate in ACM for your domain
-2. Add to tfvars: `certificate_arn = "arn:aws:acm:us-east-1:..."`
-3. `terraform apply` — adds HTTPS listener, redirects HTTP → HTTPS
+2. Set `certificate_arn = "arn:aws:acm:us-east-1:..."` (required)
+3. `terraform apply` — creates the HTTPS listener and redirects HTTP → HTTPS
 4. Point your domain's CNAME to the ALB DNS name
 
 ## Cost Estimate (us-east-1)

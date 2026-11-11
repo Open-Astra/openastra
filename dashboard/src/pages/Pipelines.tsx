@@ -17,6 +17,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDuration } from "@/lib/utils";
 import { mockAgents } from "@/hooks/use-mock-data";
 import type { PipelineRunResult, PipelineStage } from "@/types/api";
+import { DEMO_MODE } from "@/lib/demo";
 
 interface PipelinePayload {
   agents: typeof mockAgents;
@@ -78,10 +79,13 @@ export function PipelinesPage() {
       try {
         const response = await api.pipelines.run(input, stages);
         return { result: response.pipeline, offline: false };
-      } catch {
+      } catch (err) {
+        // Simulated runs are a demo-mode affordance only.
+        if (!DEMO_MODE) throw err;
         return { result: buildMockRun(input, stages), offline: true };
       }
     },
+    onError: () => toast.error("Pipeline run failed"),
     onSuccess: ({ result: pipelineResult, offline }) => {
       setResult(pipelineResult);
       setRunOffline(offline);

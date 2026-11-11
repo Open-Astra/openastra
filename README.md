@@ -1,7 +1,6 @@
 # Open Astra — [openastra.net](https://openastra.net)
 
 [![CI](https://github.com/Open-Astra/openastra/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Open-Astra/openastra/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/Open-Astra/openastra?sort=semver)](https://github.com/Open-Astra/openastra/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Security policy](https://img.shields.io/badge/security-policy-brightgreen.svg)](SECURITY.md)
 

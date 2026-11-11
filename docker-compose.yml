@@ -21,8 +21,11 @@ services:
       POSTGRES_DB: astra
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env (use a random value, e.g. openssl rand -hex 16)}
+    # Loopback only: reachable from the host (npm run dev / cli) but never
+    # from the network. Docker-published ports bypass ufw/iptables rules, so
+    # binding to 0.0.0.0 would expose the database on any public host.
     ports:
-      - "${PG_PORT:-5432}:5432"
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -37,8 +40,9 @@ services:
   typesense:
     image: typesense/typesense:27.1
     command: --data-dir /data --api-key=${TYPESENSE_API_KEY:?Set TYPESENSE_API_KEY in .env (use a random value, e.g. openssl rand -hex 16)} --enable-cors
+    # Loopback only — see the note on the postgres service.
     ports:
-      - "${TYPESENSE_PORT:-8108}:8108"
+      - "127.0.0.1:${TYPESENSE_PORT:-8108}:8108"
     volumes:
       - tsdata:/data
     healthcheck:
@@ -71,15 +75,19 @@ services:
       # Embeddings: "gemini" (requires GEMINI_API_KEY) or "local" (zero-dependency)
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
     volumes:
-      # Mount astra.yml for agent team configuration
+      # Mount astra.yml, prompts and SOUL.md so edits apply on restart
+      # without rebuilding the image (the image also bakes in a copy).
       - ./astra.yml:/app/astra.yml:ro
+      - ./prompts:/app/prompts:ro
+      - ./SOUL.md:/app/SOUL.md:ro
     depends_on:
       postgres:
         condition: service_healthy
       typesense:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      # node:20-slim has no curl/wget — probe with node itself.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 3

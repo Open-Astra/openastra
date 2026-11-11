@@ -13,9 +13,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // The gateway serves its routes at the root (/auth, /agents, …);
+      // "/api" exists only on the dashboard side, so strip it here.
       "/api": {
         target: "http://localhost:8080",
         changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, ""),
       },
       "/ws": {
         target: "ws://localhost:8080",

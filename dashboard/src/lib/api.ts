@@ -19,7 +19,38 @@ import type {
   AnomalyAlert,
 } from "@/types/api";
 
-const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
+// Base URL of the gateway REST API.
+//
+// The gateway mounts its routes at the root (/auth, /agents, /sessions, …) —
+// there is no "/api" prefix on the server. The default "/api" is a
+// same-origin prefix that your reverse proxy (or the Vite dev proxy, see
+// vite.config.ts) must strip before forwarding to the gateway. To call the
+// gateway directly, set VITE_API_URL to its origin, e.g. https://astra.example.com
+export const API_BASE = (import.meta.env.VITE_API_URL ?? "/api").replace(/\/+$/, "");
+
+const TOKEN_KEY = "astra_token";
+const USER_KEY = "astra_user";
+const CSRF_COOKIE = "csrf_token";
+const CSRF_HEADER = "X-CSRF-Token";
+
+function readCookie(name: string): string | undefined {
+  const match = document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(`${name}=`));
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : undefined;
+}
+
+// The gateway uses double-submit-cookie CSRF protection for state-changing
+// requests that carry no Bearer token (i.e. login). A safe GET makes it issue
+// the cookie; we then echo it in the X-CSRF-Token header.
+async function csrfToken(): Promise<string | undefined> {
+  let token = readCookie(CSRF_COOKIE);
+  if (!token) {
+    await fetch(`${API_BASE}/health`, { credentials: "include" }).catch(() => undefined);
+    token = readCookie(CSRF_COOKIE);
+  }
+  return token;
+}
 
 class ApiError extends Error {
   constructor(
@@ -32,18 +63,28 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = localStorage.getItem("astra_token");
+  const token = localStorage.getItem(TOKEN_KEY);
+  const method = (init?.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(init?.headers as Record<string, string> | undefined),
   };
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  if (!token && method !== "GET" && method !== "HEAD") {
+    const csrf = await csrfToken();
+    if (csrf) headers[CSRF_HEADER] = csrf;
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
 
   if (res.status === 401 && path !== "/auth/login") {
-    localStorage.removeItem("astra_token");
-    localStorage.removeItem("astra_user");
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
     if (window.location.pathname !== "/login") {
       window.location.href = "/login";
     }
@@ -61,12 +102,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // Auth
 export const auth = {
   login: (credentials: { email: string; password: string }) =>
-    request<{ token: string }>("/auth/login", {
+    request<{
+      user: { id: string; email: string; displayName?: string | null };
+      accessToken: string;
+      refreshToken: string;
+    }>("/auth/login", {
       method: "POST",
       body: JSON.stringify(credentials),
     }),
-  verify: () => request<{ valid: boolean }>("/auth/verify"),
+  // The gateway has no /auth/verify route. A stored token is checked by
+  // calling a cheap authenticated endpoint: it resolves when the gateway
+  // accepts the token and rejects (401 → ApiError) when it does not.
+  checkSession: () => request<unknown>("/agents").then(() => undefined),
 };
+
+export { ApiError };
 
 // Dashboard
 export const dashboard = {
@@ -118,7 +168,7 @@ export const chat = {
       body: JSON.stringify({ agentId, message }),
     }),
   sendStream: async function* (agentId: string, message: string) {
-    const token = localStorage.getItem("astra_token");
+    const token = localStorage.getItem(TOKEN_KEY);
     const res = await fetch(`${API_BASE}/chat/stream`, {
       method: "POST",
       headers: {

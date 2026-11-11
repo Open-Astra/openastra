@@ -1,4 +1,12 @@
-{{- if .Values.podDisruptionBudget.enabled }}
+{{- /*
+A PodDisruptionBudget is only meaningful with two or more replicas. With one
+replica, minAvailable: 1 (or maxUnavailable: 0) blocks every node drain.
+*/ -}}
+{{- $replicas := int .Values.replicaCount -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $replicas = int .Values.autoscaling.minReplicas -}}
+{{- end -}}
+{{- if and .Values.podDisruptionBudget.enabled (ge $replicas 2) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -12,9 +20,7 @@ spec:
       {{- include "astra.selectorLabels" . | nindent 6 }}
   {{- if .Values.podDisruptionBudget.minAvailable }}
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
-  {{- else if .Values.podDisruptionBudget.maxUnavailable }}
-  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   {{- else }}
-  minAvailable: 1
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable | default 1 }}
   {{- end }}
 {{- end }}

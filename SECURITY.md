@@ -23,6 +23,18 @@ Report it privately through GitHub's private vulnerability reporting:
    - Steps to reproduce or a proof of concept
    - Impact as you understand it (for example cross-workspace data access, auth bypass, SSRF, sandbox escape, or prompt-injection-to-tool-execution)
 
+### If you cannot use GitHub's private reporting
+
+<!-- TODO(maintainers): confirm this mailbox is monitored for security reports,
+     or replace it with a dedicated security address. It is the only project
+     contact published in the repo today (helm/Chart.yaml). Also confirm that
+     "Private vulnerability reporting" is enabled under
+     Settings → Code security for Open-Astra/openastra. -->
+
+Email **hello@openastra.dev** with the subject line `SECURITY`. Do not include
+exploit details in the first message — ask for a secure channel and we will
+arrange one.
+
 ### What to expect
 
 - **Acknowledgement** within 3 business days.
