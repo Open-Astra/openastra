@@ -5,6 +5,8 @@ resource "aws_lb" "main" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = aws_subnet.public[*].id
 
+  drop_invalid_header_fields = true
+
   enable_deletion_protection = true
 
   tags = {
@@ -38,11 +40,20 @@ resource "aws_lb_target_group" "gateway" {
   }
 }
 
-# ── HTTP listener (redirect to HTTPS if cert provided, else forward) ──
+# ── HTTP listener ──────────────────────────────────────────────────
+# Redirects to HTTPS. Plain-HTTP forwarding only happens when no certificate
+# is configured AND allow_insecure_http is explicitly set to true.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
+
+  lifecycle {
+    precondition {
+      condition     = var.certificate_arn != "" || var.allow_insecure_http
+      error_message = "certificate_arn is required so the gateway is served over HTTPS. Set allow_insecure_http = true to deliberately run without TLS (not for production)."
+    }
+  }
 
   dynamic "default_action" {
     for_each = var.certificate_arn != "" ? [1] : []

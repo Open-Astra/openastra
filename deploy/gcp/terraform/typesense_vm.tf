@@ -68,6 +68,9 @@ resource "google_compute_instance" "typesense" {
   metadata = {
     google-logging-enabled = "true"
 
+    # The API key is NOT embedded here: instance metadata is readable by
+    # anything on the VM and by anyone with compute.instances.get. The
+    # script fetches it from Secret Manager with the VM's own identity.
     startup-script = <<-EOF
       #!/bin/bash
       set -e
@@ -77,29 +80,81 @@ resource "google_compute_instance" "typesense" {
         mkfs.ext4 -F /dev/disk/by-id/google-typesense-data
       fi
       mkdir -p /data
-      mount /dev/disk/by-id/google-typesense-data /data || true
-      echo "/dev/disk/by-id/google-typesense-data /data ext4 defaults,nofail 0 2" >> /etc/fstab
+      mountpoint -q /data || mount /dev/disk/by-id/google-typesense-data /data
 
-      # Run Typesense in Docker
+      # Fetch the Typesense API key from Secret Manager (no gcloud on COS)
+      MD=http://metadata.google.internal/computeMetadata/v1
+      TOKEN=$(curl -sf -H "Metadata-Flavor: Google" "$MD/instance/service-accounts/default/token" \
+        | sed -E 's/.*"access_token" *: *"([^"]+)".*/\1/')
+      TS_KEY=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+        "https://secretmanager.googleapis.com/v1/projects/${var.project_id}/secrets/${google_secret_manager_secret.typesense_api_key.secret_id}/versions/latest:access" \
+        | tr -d '\n ' | sed -E 's/.*"data":"([^"]+)".*/\1/' | base64 -d)
+      if [ -z "$TS_KEY" ]; then
+        echo "FATAL: could not read Typesense API key from Secret Manager" >&2
+        exit 1
+      fi
+
+      # Key goes in a root-only env file, not on the command line (ps / docker inspect args)
+      umask 077
+      echo "TYPESENSE_API_KEY=$TS_KEY" > /var/lib/typesense.env
+
+      # Run Typesense in Docker (startup scripts re-run on every boot)
+      docker rm -f typesense 2>/dev/null || true
       docker run -d \
         --name typesense \
         --restart always \
         -p 8108:8108 \
         -v /data:/data \
-        -e TYPESENSE_API_KEY="${var.typesense_api_key}" \
+        --env-file /var/lib/typesense.env \
         typesense/typesense:27.1 \
         --data-dir /data \
-        --api-key "${var.typesense_api_key}" \
         --enable-cors
     EOF
   }
 
   service_account {
-    scopes = ["cloud-platform"]
+    email  = google_service_account.typesense.email
+    scopes = ["cloud-platform"] # access is bounded by the SA's IAM roles, not scopes
   }
+
+  shielded_instance_config {
+    enable_secure_boot = true
+  }
+
+  depends_on = [
+    google_secret_manager_secret_version.typesense_api_key,
+    google_secret_manager_secret_iam_member.typesense_api_key_vm,
+    google_compute_router_nat.main,
+  ]
 
   labels = {
     environment = "production"
     project     = var.project_name
+  }
+}
+
+# ── Cloud NAT ─────────────────────────────────────────────────────
+# Nothing in this VPC has an external IP. Without NAT the Typesense VM
+# cannot pull its image from Docker Hub, and the Cloud Run gateway (whose
+# egress is routed through the VPC connector with ALL_TRAFFIC) cannot reach
+# LLM provider APIs.
+resource "google_compute_router" "main" {
+  name    = "${var.project_name}-router"
+  region  = var.gcp_region
+  network = google_compute_network.main.id
+  project = var.project_id
+}
+
+resource "google_compute_router_nat" "main" {
+  name                               = "${var.project_name}-nat"
+  router                             = google_compute_router.main.name
+  region                             = var.gcp_region
+  project                            = var.project_id
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
   }
 }

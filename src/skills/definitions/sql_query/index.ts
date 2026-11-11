@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
 import { getPool } from "../../../config/postgres.js";
+import { guardSelect, runGuardedSelect, SCOPED_TABLES } from "../../../tools/sql-guard.js";
 
 // ── SQL Query Skill ───────────────────────────────────────────────
 // Read-only SQL queries against the application's Postgres database.
@@ -10,63 +11,23 @@ import { getPool } from "../../../config/postgres.js";
 //
 // Safety: Only SELECT statements are allowed. DML/DDL is rejected.
 
-const ALLOWED_TABLES = new Set([
-  "sessions",
-  "messages",
-  "daily_memory",
-  "memory_profiles",
-  "billing_usage",
-  "graph_entities",
-  "graph_edges",
-  "procedural_memory",
-  "knowledge_store",
-  "agent_config_versions",
-]);
-
-const FORBIDDEN_PATTERNS = [
-  /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE)\b/i,
-  /\b(COPY|EXECUTE|CALL)\b/i,
-  /;\s*\S/,  // multiple statements
-  /\bpg_catalog\b/i,
-  /\binformation_schema\b/i,
-  /\bpg_toast\b/i,
-];
-
-function validateQuery(sql: string): { valid: boolean; reason?: string } {
-  const trimmed = sql.trim().replace(/;$/, "");
-
-  if (!trimmed.toUpperCase().startsWith("SELECT") && !trimmed.toUpperCase().startsWith("WITH")) {
-    return { valid: false, reason: "Only SELECT (and WITH/CTE) queries are allowed." };
-  }
-
-  for (const pattern of FORBIDDEN_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return { valid: false, reason: `Query contains forbidden SQL pattern: ${pattern.source}` };
-    }
-  }
-
-  // Extract table references (after FROM, JOIN, INTO, UPDATE keywords)
-  const tablePattern = /\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:ONLY\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/gi;
-  let match: RegExpExecArray | null;
-  const referencedTables: string[] = [];
-
-  while ((match = tablePattern.exec(trimmed)) !== null) {
-    const raw = match[1]!;
-    // Handle schema-qualified names like public.sessions → extract table part
-    const tableName = raw.includes(".") ? raw.split(".").pop()! : raw;
-    referencedTables.push(tableName.toLowerCase());
-  }
-
-  const disallowed = referencedTables.filter((t) => !ALLOWED_TABLES.has(t));
-  if (disallowed.length > 0) {
-    return {
-      valid: false,
-      reason: `Query references unauthorized table(s): ${[...new Set(disallowed)].join(", ")}. Allowed tables: ${[...ALLOWED_TABLES].join(", ")}`,
-    };
-  }
-
-  return { valid: true };
-}
+// Tables this skill exposes. Each must also be defined (with its tenant
+// scoping predicate) in tools/sql-guard.ts; anything not defined there is
+// dropped, so a table without a sound per-user filter is never queryable.
+const ALLOWED_TABLES = new Set(
+  [
+    "sessions",
+    "messages",
+    "daily_memory",
+    "memory_profiles",
+    "billing_usage",
+    "graph_entities",
+    "graph_edges",
+    "procedural_memory",
+    "knowledge_store",
+    "agent_config_versions",
+  ].filter((t) => t in SCOPED_TABLES),
+);
 
 const SqlQueryParams = z.object({
   query: z.string().describe("SQL SELECT query to execute (read-only)"),
@@ -106,40 +67,33 @@ const sqlQuerySkill: SkillDefinition = {
   init(ctx: PluginContext) {
     ctx.registerTool({
       name: "sql_query",
-      description: "Execute a read-only SQL query. Only SELECT and WITH/CTE statements are allowed. Results are automatically limited to 100 rows.",
+      description: "Execute a read-only SQL SELECT over your own data. One table per query — no joins, subqueries, CTEs or comments. Results are limited to your rows and at most 100 rows.",
       parameters: SqlQueryParams,
 
-      async execute(params, _toolCtx) {
-        const validation = validateQuery(params.query);
-        if (!validation.valid) {
-          return { error: validation.reason };
+      async execute(params, toolCtx) {
+        // Structural validation (single statement, single table, no CTEs,
+        // subqueries, joins or comments) + rewrite to the caller's own rows.
+        // The rewritten SQL is the SQL that runs.
+        const guarded = guardSelect(
+          params.query,
+          undefined,
+          { uid: toolCtx?.uid, workspaceId: toolCtx?.workspaceId },
+          { limit: params.limit ?? 25, maxLimit: 100, tables: ALLOWED_TABLES },
+        );
+        if (!guarded.ok) {
+          return { error: guarded.error };
         }
 
-        const pool = getPool();
-        const limit = params.limit ?? 25;
-
-        // Wrap in a read-only transaction for safety
-        const client = await pool.connect();
+        const client = await getPool().connect();
         try {
-          await client.query("BEGIN READ ONLY");
-
-          // Add LIMIT if not present
-          let sql = params.query.trim().replace(/;$/, "");
-          if (!/\bLIMIT\b/i.test(sql)) {
-            sql += ` LIMIT ${limit}`;
-          }
-
-          const { rows, fields } = await client.query(sql);
-          await client.query("COMMIT");
-
+          const result = await runGuardedSelect(client, guarded, 10_000);
           return {
             success: true,
-            rowCount: rows.length,
-            columns: fields.map((f) => f.name),
-            rows: rows.slice(0, 100),
+            rowCount: result.rows.length,
+            columns: result.fields.map((f) => f.name),
+            rows: result.rows.slice(0, 100),
           };
         } catch (err) {
-          await client.query("ROLLBACK").catch(() => {});
           return {
             error: err instanceof Error ? err.message : String(err),
             query: params.query,
@@ -171,7 +125,7 @@ const sqlQuerySkill: SkillDefinition = {
         }>(
           `SELECT column_name, data_type, is_nullable, column_default
            FROM information_schema.columns
-           WHERE table_name = $1
+           WHERE table_name = $1 AND table_schema = 'public'
            ORDER BY ordinal_position`,
           [params.table],
         );
@@ -244,7 +198,7 @@ const sqlQuerySkill: SkillDefinition = {
     return {
       skillId: "sql_query",
       instructions:
-        "You can query the database with `sql_query` (read-only SELECT/CTE), inspect table schemas with `sql_table_info`, and get quick metrics with `sql_quick_stats` (session_count, message_count, memory_entries, graph_entities, graph_edges, procedure_count, token_usage).",
+        "You can query your own data with `sql_query` (read-only, single-table SELECT), inspect table schemas with `sql_table_info`, and get quick metrics with `sql_quick_stats` (session_count, message_count, memory_entries, graph_entities, graph_edges, procedure_count, token_usage).",
     };
   },
 };

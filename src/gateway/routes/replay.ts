@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { clampLimit } from "../middleware/validation.js";
 import {
   startRecording,
   completeRecording,
@@ -26,7 +27,7 @@ export function createReplayRouter(): Router {
     try {
       const { workspaceId } = (req as unknown as WorkspaceAwareRequest).workspace;
       if (!workspaceId) return res.status(400).json({ error: "workspace required" });
-      const limit = req.query["limit"] ? Number(req.query["limit"]) : 50;
+      const limit = clampLimit(req.query["limit"], 50, 200);
       const recordings = await listRecordings(workspaceId, limit);
       return res.json(recordings);
     } catch (err) {

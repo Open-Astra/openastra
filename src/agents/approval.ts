@@ -184,15 +184,30 @@ export async function resolveApproval(
   status: "approved" | "denied" | "expired",
   resolvedBy: string = "user",
   reason?: string,
+  scope?: { uid: string; workspaceId?: string },
 ): Promise<boolean> {
   const pool = getPool();
 
-  await pool.query(
-    `UPDATE approval_requests
-     SET status = $1, resolved_at = NOW(), resolved_by = $2, reason = $3
-     WHERE id = $4 AND status = 'pending'`,
-    [status, resolvedBy, reason ?? null, requestId],
-  );
+  if (scope) {
+    // Caller-scoped resolution: only the user the request belongs to (and,
+    // when given, only inside the same workspace) may resolve it.
+    const result = await pool.query(
+      `UPDATE approval_requests
+       SET status = $1, resolved_at = NOW(), resolved_by = $2, reason = $3
+       WHERE id = $4 AND status = 'pending'
+         AND (user_id = $5 OR uid = $5)
+         AND ($6::text IS NULL OR workspace_id::text = $6::text)`,
+      [status, resolvedBy, reason ?? null, requestId, scope.uid, scope.workspaceId ?? null],
+    );
+    if ((result?.rowCount ?? 0) === 0) return false;
+  } else {
+    await pool.query(
+      `UPDATE approval_requests
+       SET status = $1, resolved_at = NOW(), resolved_by = $2, reason = $3
+       WHERE id = $4 AND status = 'pending'`,
+      [status, resolvedBy, reason ?? null, requestId],
+    );
+  }
 
   const approved = status === "approved";
 

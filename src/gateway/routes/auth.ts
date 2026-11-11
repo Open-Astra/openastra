@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { hashPassword, verifyPassword } from "../../auth/passwords.js";
@@ -8,6 +9,7 @@ import {
   verifyRefreshToken,
   revokeToken,
   revokeAllAccessTokens,
+  decodeTokenUnsafe,
 } from "../../auth/jwt.js";
 import {
   createUser,
@@ -21,7 +23,8 @@ import {
   revokeTokenFamily,
 } from "../../auth/store.js";
 import { bruteForceProtection, recordFailedAttempt, recordSuccessfulAttempt, getClientIp } from "../middleware/brute-force.js";
-import { jwtAuth } from "../middleware/auth.js";
+import { jwtAuth, requestFingerprint } from "../middleware/auth.js";
+import { isPlatformAdmin } from "../middleware/platform-admin.js";
 import type { AuthenticatedRequest } from "../middleware/auth.js";
 import { getEventBus } from "../../events/index.js";
 import { createLogger } from "../../utils/logger.js";
@@ -45,9 +48,58 @@ const RefreshBody = z.object({
   refreshToken: z.string(),
 });
 
+// Revocation targets:
+//   { token }          — an access token the caller holds (must be their own)
+//   { all: true }      — every access + refresh token of the caller
+//   { jti } / { uid }  — arbitrary token / user; platform admin key only
 const RevokeBody = z.object({
-  jti: z.string().min(1),
+  token: z.string().min(1).max(4096).optional(),
+  all: z.boolean().optional(),
+  jti: z.string().min(1).max(256).optional(),
+  uid: z.string().min(1).max(256).optional(),
+}).refine((b) => [b.token, b.all, b.jti, b.uid].filter(Boolean).length === 1, {
+  message: "Provide exactly one of: token, all, jti, uid",
 });
+
+// ── Registration throttle ───────────────────────────────────────────
+// Registration is unauthenticated, so it is limited per client IP.
+// REGISTRATION_ENABLED=false turns self-service signup off entirely
+// (accounts are then created by the operator).
+
+const REGISTER_WINDOW_MS = 60 * 60 * 1000;
+const REGISTER_MAX = Math.max(1, parseInt(process.env.REGISTRATION_RATE_LIMIT_PER_HOUR ?? "5", 10) || 5);
+const registerAttempts = new Map<string, number[]>();
+
+const registerCleanup = setInterval(() => {
+  const cutoff = Date.now() - REGISTER_WINDOW_MS;
+  for (const [ip, stamps] of registerAttempts) {
+    const live = stamps.filter((t) => t > cutoff);
+    if (live.length === 0) registerAttempts.delete(ip);
+    else registerAttempts.set(ip, live);
+  }
+}, 10 * 60_000);
+registerCleanup.unref();
+
+function allowRegistration(ip: string): boolean {
+  const now = Date.now();
+  const live = (registerAttempts.get(ip) ?? []).filter((t) => t > now - REGISTER_WINDOW_MS);
+  if (live.length >= REGISTER_MAX) {
+    registerAttempts.set(ip, live);
+    return false;
+  }
+  live.push(now);
+  registerAttempts.set(ip, live);
+  return true;
+}
+
+// Compared against when the email is unknown so login takes the same time
+// whether or not the account exists. Generated lazily (same bcrypt cost as
+// real hashes) from a random value that can never match.
+let dummyHash: Promise<string> | undefined;
+function getDummyPasswordHash(): Promise<string> {
+  dummyHash ??= hashPassword(randomUUID());
+  return dummyHash;
+}
 
 // ── Auth Router ─────────────────────────────────────────────────────
 
@@ -56,6 +108,17 @@ export function createAuthRouter(): Router {
 
   // POST /auth/register
   router.post("/register", async (req: Request, res: Response) => {
+    if (process.env.REGISTRATION_ENABLED === "false") {
+      res.status(403).json({ error: "Self-service registration is disabled" });
+      return;
+    }
+
+    if (!allowRegistration(getClientIp(req))) {
+      res.setHeader("Retry-After", String(Math.ceil(REGISTER_WINDOW_MS / 1000)));
+      res.status(429).json({ error: "Too many registration attempts. Please try again later." });
+      return;
+    }
+
     const parsed = RegisterBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.format() });
@@ -74,7 +137,7 @@ export function createAuthRouter(): Router {
       const hash = await hashPassword(password);
       const user = await createUser(email, hash, displayName);
 
-      const accessToken = await signAccessToken(user.id);
+      const accessToken = await signAccessToken(user.id, requestFingerprint(req));
       const refreshToken = await signRefreshToken(user.id);
       await storeRefreshToken(user.id, refreshToken);
 
@@ -103,6 +166,9 @@ export function createAuthRouter(): Router {
     try {
       const user = await findUserByEmail(email);
       if (!user) {
+        // Burn the same bcrypt time as a real check so response timing
+        // does not reveal whether the email is registered.
+        await verifyPassword(password, await getDummyPasswordHash()).catch(() => false);
         // Record failure but return generic message
         await recordFailedAttempt(ip);
         res.status(401).json({ error: "Invalid credentials" });
@@ -119,7 +185,7 @@ export function createAuthRouter(): Router {
       // Successful login — clear brute-force counter
       await recordSuccessfulAttempt(ip);
 
-      const accessToken = await signAccessToken(user.id);
+      const accessToken = await signAccessToken(user.id, requestFingerprint(req));
       const refreshToken = await signRefreshToken(user.id);
       await storeRefreshToken(user.id, refreshToken);
 
@@ -194,7 +260,7 @@ export function createAuthRouter(): Router {
       // Rotate: revoke old, issue new (in the same family)
       await revokeRefreshToken(refreshToken);
 
-      const newAccessToken = await signAccessToken(uid);
+      const newAccessToken = await signAccessToken(uid, requestFingerprint(req));
       const newRefreshToken = await signRefreshToken(uid);
       await storeRefreshToken(uid, newRefreshToken, family ?? undefined);
 
@@ -216,7 +282,7 @@ export function createAuthRouter(): Router {
     }
 
     try {
-      const { uid } = await verifyAccessToken(authHeader.slice(7));
+      const { uid } = await verifyAccessToken(authHeader.slice(7), requestFingerprint(req));
 
       // Revoke all refresh tokens
       await revokeAllUserTokens(uid);
@@ -230,7 +296,11 @@ export function createAuthRouter(): Router {
     }
   });
 
-  // POST /auth/revoke — revoke a specific access token by JTI (admin only)
+  // POST /auth/revoke — revoke access tokens.
+  // A user may revoke a token they hold, or all of their own tokens.
+  // Revoking someone else's token (by jti or uid) is a platform-admin
+  // operation: it requires the INTERNAL_API_KEY in X-Api-Key. Workspace
+  // ownership grants no authority over other users' sessions.
   router.post("/revoke", jwtAuth(), async (req: Request, res: Response) => {
     const parsed = RevokeBody.safeParse(req.body);
     if (!parsed.success) {
@@ -238,53 +308,77 @@ export function createAuthRouter(): Router {
       return;
     }
 
-    const { jti } = parsed.data;
-    const adminUid = (req as AuthenticatedRequest).uid;
+    const callerUid = (req as AuthenticatedRequest).uid;
+    const { token, all, jti, uid: targetUid } = parsed.data;
+    const bus = getEventBus();
 
-    // Admin role check — only workspace owners can revoke arbitrary tokens.
-    // Regular users can only revoke their own tokens (jti must start with their uid sentinel).
     try {
-      const pool = (await import("../../config/postgres.js")).getPool();
-      const { rows } = await pool.query(
-        `SELECT 1 FROM workspace_members WHERE user_id = $1 AND role = 'owner' LIMIT 1`,
-        [adminUid],
-      );
-      const isOwner = rows.length > 0;
+      // 1. All of the caller's own tokens
+      if (all) {
+        await revokeAllUserTokens(callerUid);
+        await revokeAllAccessTokens(callerUid);
+        bus.emit("security.token_revoked", {
+          uid: callerUid, jti: `all:${callerUid}`, revokedBy: callerUid, timestamp: Date.now(),
+        });
+        res.json({ message: "All tokens revoked" });
+        return;
+      }
 
-      // Non-owners can only revoke tokens they own — check revoked_tokens or
-      // only allow revoking their own sentinel (all:<uid>)
-      if (!isOwner) {
-        // Check if the JTI belongs to a token the user owns
-        const tokenCheck = await pool.query(
-          `SELECT uid FROM revoked_tokens WHERE jti = $1`,
-          [jti],
-        );
-        // If JTI is not yet revoked, we can't verify ownership — deny for non-owners
-        if (tokenCheck.rows.length === 0 && !jti.startsWith(`all:${adminUid}`)) {
-          res.status(403).json({ error: "Only workspace owners can revoke arbitrary tokens" });
+      // 2. A specific token the caller holds — must verify and be their own
+      if (token) {
+        let owner: string;
+        try {
+          ({ uid: owner } = await verifyAccessToken(token, requestFingerprint(req)));
+        } catch {
+          // Already invalid/expired/revoked — nothing left to revoke
+          res.json({ message: "Token revoked" });
           return;
         }
+        if (owner !== callerUid) {
+          res.status(403).json({ error: "You can only revoke your own tokens" });
+          return;
+        }
+        const claims = decodeTokenUnsafe(token);
+        if (!claims.jti) {
+          res.status(400).json({ error: "Token has no jti claim" });
+          return;
+        }
+        const exp = claims.exp ? new Date(claims.exp * 1000) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+        await revokeToken(claims.jti, exp, callerUid);
+        bus.emit("security.token_revoked", {
+          uid: callerUid, jti: claims.jti, revokedBy: callerUid, timestamp: Date.now(),
+        });
+        res.json({ message: "Token revoked", jti: claims.jti });
+        return;
       }
-    } catch {
-      // If workspace_members check fails, deny by default (fail-closed)
-      res.status(403).json({ error: "Unable to verify admin status" });
-      return;
-    }
 
-    try {
-      // Default expiration: 24 hours from now (covers max access token lifetime)
+      // 3. Arbitrary jti / uid — platform admin only
+      if (!isPlatformAdmin(req)) {
+        res.status(403).json({ error: "Revoking another user's tokens requires the platform admin key" });
+        return;
+      }
+
+      if (targetUid) {
+        await revokeAllUserTokens(targetUid);
+        await revokeAllAccessTokens(targetUid);
+        bus.emit("security.token_revoked", {
+          uid: targetUid, jti: `all:${targetUid}`, revokedBy: callerUid, timestamp: Date.now(),
+        });
+        res.json({ message: "All tokens revoked", uid: targetUid });
+        return;
+      }
+
+      // Raw jti. The "all:<uid>" sentinel namespace is reserved for the
+      // bulk-revocation paths above.
+      if (!jti || jti.startsWith("all:")) {
+        res.status(400).json({ error: "Invalid jti" });
+        return;
+      }
       const exp = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      await revokeToken(jti, exp, adminUid);
-
-      // Emit security event
-      const bus = getEventBus();
+      await revokeToken(jti, exp);
       bus.emit("security.token_revoked", {
-        uid: adminUid,
-        jti,
-        revokedBy: adminUid,
-        timestamp: Date.now(),
+        uid: callerUid, jti, revokedBy: callerUid, timestamp: Date.now(),
       });
-
       res.json({ message: "Token revoked", jti });
     } catch (err) {
       log.error("Token revocation error:", err);

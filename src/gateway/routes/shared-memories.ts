@@ -7,14 +7,22 @@ import {
   getMemoriesSharedBy,
   revokeSharedMemory,
 } from "../../memory/cross-agent.js";
+import { authorizeAgentRun } from "../agent-access.js";
 
 const ShareMemoryBody = z.object({
-  sourceAgentId: z.string().min(1),
-  targetAgentId: z.string().min(1),
-  memoryType: z.string().min(1),
-  memoryId: z.string().min(1),
+  sourceAgentId: z.string().min(1).max(128),
+  targetAgentId: z.string().min(1).max(128),
+  memoryType: z.string().min(1).max(64),
+  memoryId: z.string().min(1).max(128),
   expiresAt: z.string().datetime().optional(),
 });
+
+/** Workspace named by the caller, if any. Membership is verified by authorizeAgentRun. */
+function workspaceHeader(req: { headers: Record<string, unknown> }): string | null {
+  const raw = req.headers["x-workspace-id"];
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  return typeof v === "string" && v ? v : null;
+}
 
 export function createSharedMemoriesRouter(): Router {
   const router = Router();
@@ -31,10 +39,21 @@ export function createSharedMemoriesRouter(): Router {
     }
 
     try {
-      const memories =
+      // The caller must be able to use this agent at all…
+      const access = await authorizeAgentRun(uid, agentId, workspaceHeader(req), { enforceBudget: false });
+      if (!access.ok) {
+        res.status(access.status).json({ error: access.message });
+        return;
+      }
+
+      const all =
         direction === "shared"
           ? await getMemoriesSharedBy(agentId)
           : await getSharedMemories(agentId);
+
+      // …and only sees shares they created. Agents (especially global
+      // ones) are used by many users; share rows are per-user data.
+      const memories = all.filter((m) => m.sharedBy === uid);
 
       res.json({ memories, uid });
     } catch (err) {
@@ -54,6 +73,15 @@ export function createSharedMemoriesRouter(): Router {
     const uid = (req as unknown as AuthenticatedRequest).uid;
 
     try {
+      // Both ends of the share must be agents the caller may use
+      for (const agentId of [parsed.data.sourceAgentId, parsed.data.targetAgentId]) {
+        const access = await authorizeAgentRun(uid, agentId, workspaceHeader(req), { enforceBudget: false });
+        if (!access.ok) {
+          res.status(access.status).json({ error: access.message });
+          return;
+        }
+      }
+
       const id = await shareMemory(
         parsed.data.sourceAgentId,
         parsed.data.targetAgentId,

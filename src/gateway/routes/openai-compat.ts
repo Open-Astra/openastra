@@ -123,11 +123,20 @@ function apiKeyAuth(req: Request, res: Response): boolean {
   }
 
   const provided = authHeader.slice(7);
-  const expected = process.env.OPENAI_COMPAT_API_KEY ?? process.env.INTERNAL_API_KEY;
+  // Dedicated key only. This API previously fell back to INTERNAL_API_KEY,
+  // which meant the platform admin key was handed to every OpenAI-SDK
+  // client; the endpoint is now disabled until OPENAI_COMPAT_API_KEY is set.
+  const expected = process.env.OPENAI_COMPAT_API_KEY;
 
   if (!expected) {
-    res.status(500).json({
-      error: { message: "Server not configured for OpenAI-compat API. Set OPENAI_COMPAT_API_KEY.", type: "server_error" },
+    res.status(503).json({
+      error: { message: "OpenAI-compatible API is disabled. Set OPENAI_COMPAT_API_KEY to enable it.", type: "server_error" },
+    });
+    return false;
+  }
+  if (process.env.INTERNAL_API_KEY && expected === process.env.INTERNAL_API_KEY) {
+    res.status(503).json({
+      error: { message: "OPENAI_COMPAT_API_KEY must differ from INTERNAL_API_KEY.", type: "server_error" },
     });
     return false;
   }

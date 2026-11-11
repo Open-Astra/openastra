@@ -4,6 +4,7 @@ import type { WorkspaceAwareRequest } from "../middleware/workspace.js";
 import {
   createPairSession, addTurn, endSession, getPairSessions, getPairSession,
 } from "../../agents/pair-programming.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const CreateBody = z.object({
   generatorId: z.string(),
@@ -40,23 +41,23 @@ export function createPairSessionsRouter(): Router {
     res.json({ sessions: await getPairSessions(workspaceId) });
   });
 
-  router.get("/pair-sessions/:id", async (req, res) => {
-    const session = await getPairSession(req.params.id);
+  router.get("/pair-sessions/:id", requireOwned("pairSession"), async (req, res) => {
+    const session = await getPairSession((req.params.id as string));
     if (!session) return res.status(404).json({ error: "Session not found" });
     res.json(session);
   });
 
-  router.post("/pair-sessions/:id/turns", async (req, res) => {
+  router.post("/pair-sessions/:id/turns", requireOwned("pairSession"), async (req, res) => {
     const parsed = TurnBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    const turn = await addTurn(req.params.id, parsed.data.agentId, parsed.data.role, parsed.data.content);
+    const turn = await addTurn((req.params.id as string), parsed.data.agentId, parsed.data.role, parsed.data.content);
     res.status(201).json(turn);
   });
 
-  router.post("/pair-sessions/:id/end", async (req, res) => {
+  router.post("/pair-sessions/:id/end", requireOwned("pairSession"), async (req, res) => {
     const parsed = EndBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    await endSession(req.params.id, parsed.data.outcome, parsed.data.qualityScore);
+    await endSession((req.params.id as string), parsed.data.outcome, parsed.data.qualityScore);
     res.json({ ended: true });
   });
 

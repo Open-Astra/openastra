@@ -50,8 +50,15 @@ spec:
         # Uses nc (netcat) which is present in node:20-slim via the netcat-openbsd
         # package, or falls back to a /dev/tcp shell check.
         - name: wait-for-postgres
-          image: busybox:1.36
+          image: busybox:1.36.1
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
           command:
             - sh
             - -c
@@ -65,7 +72,10 @@ spec:
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
+            readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop:
                 - ALL
@@ -78,7 +88,11 @@ spec:
         - name: gateway
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.image.digest }}
+          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- else }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -110,27 +124,18 @@ spec:
                   name: {{ include "astra.secretName" . }}
                   key: TYPESENSE_API_KEY
 
-            # PostgreSQL connection
+            # PostgreSQL connection (non-secret settings come straight from
+            # values, so an externally managed Secret only needs the four
+            # secret keys: JWT_SECRET, INTERNAL_API_KEY, TYPESENSE_API_KEY,
+            # PG_PASSWORD).
             - name: PG_HOST
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "astra.secretName" . }}
-                  key: PG_HOST
+              value: {{ required "postgres.host is required" .Values.postgres.host | quote }}
             - name: PG_PORT
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "astra.secretName" . }}
-                  key: PG_PORT
+              value: {{ .Values.postgres.port | quote }}
             - name: PG_DATABASE
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "astra.secretName" . }}
-                  key: PG_DATABASE
+              value: {{ .Values.postgres.database | quote }}
             - name: PG_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "astra.secretName" . }}
-                  key: PG_USER
+              value: {{ .Values.postgres.user | quote }}
             - name: PG_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -139,7 +144,7 @@ spec:
 
             # Typesense connection
             - name: TYPESENSE_HOST
-              value: {{ .Values.typesense.host | quote }}
+              value: {{ required "typesense.host is required" .Values.typesense.host | quote }}
             - name: TYPESENSE_PORT
               value: {{ .Values.typesense.port | quote }}
             - name: TYPESENSE_PROTOCOL
@@ -162,8 +167,7 @@ spec:
 
           # ── Volume Mounts ──────────────────────────────────────────────────
           volumeMounts:
-            # tmpfs mount satisfies any app writes to /tmp without requiring
-            # readOnlyRootFilesystem: true on the root filesystem.
+            # Writable scratch space — the root filesystem is read-only.
             - name: tmp
               mountPath: /tmp
             {{- with .Values.extraVolumeMounts }}

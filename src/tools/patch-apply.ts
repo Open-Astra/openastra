@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { resolve, sep } from "node:path";
+import { tryGuardPath } from "./path-guard.js";
 import { registerTool } from "./registry.js";
 import { readFile, writeFile } from "node:fs/promises";
 import { createLogger } from "../utils/logger.js";
@@ -109,7 +109,7 @@ registerTool({
   description:
     "Apply a unified diff patch to a file. Validates that the patch applies cleanly before writing. Supports dry-run mode to preview changes without modifying the file. Use for applying code changes expressed as diff -u or git diff output.",
   parameters: Params,
-  async execute(params, _ctx) {
+  async execute(params, ctx) {
     const { filePath, patch, dryRun } = params;
 
     // Block null bytes — path truncation attack vector
@@ -118,11 +118,13 @@ registerTool({
     }
 
     // Guard against path traversal — resolved path must stay within CWD
-    const resolvedPath = resolve(filePath);
-    const cwd = process.cwd();
-    if (!resolvedPath.startsWith(cwd + sep) && resolvedPath !== cwd) {
-      return { error: "Path must be within the current working directory" };
+    // (symlink-resolved, secrets blocklist, per-agent fileAccess, and in
+    // server mode no patching of application code/config)
+    const guardedPath = tryGuardPath(filePath, { access: dryRun ? "read" : "write", agentId: ctx?.agentId });
+    if (!guardedPath.ok) {
+      return { error: guardedPath.error };
     }
+    const resolvedPath = guardedPath.path;
 
     // Step 1: Read the original file (use resolvedPath, not raw filePath)
     let original: string;

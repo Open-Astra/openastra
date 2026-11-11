@@ -17,6 +17,15 @@ vi.mock("../../src/tools/registry.js", () => ({
   executeTool: (...args: unknown[]) => mockExecuteTool(...args),
 }));
 
+// The delegation target must itself be allowed to run the tool.
+const { mockGetAgentConfig } = vi.hoisted(() => ({ mockGetAgentConfig: vi.fn() }));
+vi.mock("../../src/config/agents.js", () => ({
+  getAgentConfig: (...args: unknown[]) => mockGetAgentConfig(...args),
+}));
+vi.mock("../../src/skills/registry.js", () => ({
+  getSkillToolNames: () => [],
+}));
+
 vi.mock("../../src/events/index.js", () => ({
   getEventBus: () => ({
     emit: mockEmit,
@@ -39,6 +48,11 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockGetAgentConfig.mockImplementation((id: string) => ({
+    id,
+    skills: [],
+    tools: { allow: ["web_search"], deny: [] },
+  }));
 });
 
 describe("validateDelegationTarget", () => {
@@ -92,6 +106,41 @@ describe("delegateToolCall", () => {
       delegationTrail: ["agent-root", "agent-a", "agent-b"],
     });
     expect((allowedTools as Set<string>).has("web_search")).toBe(true);
+  });
+
+  it("refuses when the target agent is not allowed to run the tool", async () => {
+    mockFindAgentsWithTool.mockReturnValue(["agent-b"]);
+    mockGetAgentConfig.mockImplementation((id: string) => ({
+      id,
+      skills: [],
+      tools: { allow: ["memory_search"], deny: [] },
+    }));
+
+    const result = await delegateToolCall(
+      { requestId: "r-x", fromAgentId: "agent-a", fromRole: "researcher", toolName: "shell_execute", toolArgs: {} },
+      makeCtx({ agentId: "agent-a", metadata: {} }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("not permitted");
+    expect(mockExecuteTool).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the target agent denies the tool (hyphen/underscore insensitive)", async () => {
+    mockFindAgentsWithTool.mockReturnValue(["agent-b"]);
+    mockGetAgentConfig.mockImplementation((id: string) => ({
+      id,
+      skills: [],
+      tools: { allow: ["shell_execute"], deny: ["shell-execute"] },
+    }));
+
+    const result = await delegateToolCall(
+      { requestId: "r-y", fromAgentId: "agent-a", fromRole: "researcher", toolName: "shell_execute", toolArgs: {} },
+      makeCtx({ agentId: "agent-a", metadata: {} }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(mockExecuteTool).not.toHaveBeenCalled();
   });
 
   it("rejects delegating the delegation tool itself", async () => {

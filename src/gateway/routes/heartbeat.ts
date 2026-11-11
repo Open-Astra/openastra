@@ -24,7 +24,7 @@ export function createHeartbeatRouter(): Router {
   router.get("/", async (req, res) => {
     try {
       const uid = (req as AuthenticatedRequest).uid;
-      const wsReq = req as WorkspaceAwareRequest;
+      const wsReq = req as unknown as WorkspaceAwareRequest;
       const workspaceId = wsReq.workspace?.workspaceId ?? null;
 
       const pool = getPool();
@@ -71,7 +71,7 @@ export function createHeartbeatRouter(): Router {
 
     try {
       const uid = (req as AuthenticatedRequest).uid;
-      const wsReq = req as WorkspaceAwareRequest;
+      const wsReq = req as unknown as WorkspaceAwareRequest;
       const workspaceId = wsReq.workspace?.workspaceId ?? null;
 
       const pool = getPool();
@@ -135,7 +135,7 @@ export function createHeartbeatRouter(): Router {
 
     try {
       const uid = (req as unknown as AuthenticatedRequest).uid;
-      const wsReq = req as WorkspaceAwareRequest;
+      const wsReq = req as unknown as WorkspaceAwareRequest;
       const workspaceId = wsReq.workspace?.workspaceId ?? null;
       const { id } = req.params as { id: string };
       const { enabled } = patchParsed.data;
@@ -164,7 +164,7 @@ export function createHeartbeatRouter(): Router {
   router.delete("/:id", async (req, res) => {
     try {
       const uid = (req as unknown as AuthenticatedRequest).uid;
-      const wsReq = req as WorkspaceAwareRequest;
+      const wsReq = req as unknown as WorkspaceAwareRequest;
       const workspaceId = wsReq.workspace?.workspaceId ?? null;
       const { id } = req.params as { id: string };
 

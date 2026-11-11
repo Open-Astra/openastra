@@ -170,7 +170,10 @@ resource "aws_ecs_task_definition" "typesense" {
         }
       ]
 
-      command = ["--data-dir=/data", "--api-key=$(TYPESENSE_API_KEY)", "--enable-cors"]
+      # The API key is NOT passed on the command line: ECS does not expand
+      # $(VAR) (that is Kubernetes syntax). Typesense reads TYPESENSE_API_KEY
+      # from the environment, which the `secrets` block above injects.
+      command = ["--data-dir=/data", "--enable-cors"]
 
       logConfiguration = {
         logDriver = "awslogs"

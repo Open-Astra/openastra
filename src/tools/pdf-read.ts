@@ -1,10 +1,8 @@
 import { z } from "zod";
 import { readFile, stat } from "node:fs/promises";
-import { resolve, normalize } from "node:path";
-import { homedir } from "node:os";
 import { registerTool } from "./registry.js";
-import { getAgentConfig } from "../config/agents.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { tryGuardPath } from "./path-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── pdf_read ──────────────────────────────────────────────────────────
 // Extract text content from PDF files (local or URL) using pdf-parse.
@@ -22,10 +20,6 @@ const PdfReadParams = z.object({
     .default(50)
     .describe("Maximum number of pages to extract (default 50, max 500)"),
 });
-
-function expandPath(p: string): string {
-  return p.startsWith("~/") ? resolve(homedir(), p.slice(2)) : resolve(p);
-}
 
 function isUrl(source: string): boolean {
   return source.startsWith("http://") || source.startsWith("https://");
@@ -51,7 +45,7 @@ registerTool({
         const timer = setTimeout(() => controller.abort(), 30_000);
 
         try {
-          const res = await fetch(params.source, {
+          const res = await safeFetch(params.source, {
             headers: { "User-Agent": "Astra-Agent/1.0" },
             signal: controller.signal,
             redirect: "manual",
@@ -86,28 +80,11 @@ registerTool({
         }
 
         // Read from local filesystem
-        const filePath = resolve(normalize(params.source));
-
-        // Safety: block common sensitive paths
-        const blocked = ["/etc/shadow", "/etc/passwd", ".env"];
-        if (blocked.some((b) => filePath.includes(b))) {
-          return { error: "Access to this file is restricted for security." };
+        const guardedPath = tryGuardPath(params.source, { access: "read", agentId: ctx?.agentId });
+        if (!guardedPath.ok) {
+          return { error: guardedPath.error };
         }
-
-        // Per-agent file access restrictions
-        const agentConfig = ctx?.agentId ? getAgentConfig(ctx.agentId) : null;
-        if (agentConfig?.fileAccess?.restricted) {
-          if (agentConfig.fileAccess.allowedPaths.length === 0) {
-            return { error: `File access denied. Agent "${ctx.agentId}" has no allowed paths configured.` };
-          }
-          const allowed = agentConfig.fileAccess.allowedPaths.map(expandPath);
-          const isAllowed = allowed.some((p) => filePath.startsWith(p));
-          if (!isAllowed) {
-            return {
-              error: `File access restricted. Agent "${ctx.agentId}" can only access: ${allowed.join(", ")}`,
-            };
-          }
-        }
+        const filePath = guardedPath.path;
 
         const info = await stat(filePath);
         if (!info.isFile()) {

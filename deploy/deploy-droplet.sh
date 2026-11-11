@@ -14,6 +14,17 @@
 #   ./deploy/deploy-droplet.sh --size s-1vcpu-2gb --region sfo3
 #
 # Estimated cost: $6-12/mo depending on size
+#
+# SECURITY NOTES
+#   * API keys and generated secrets are delivered to the Droplet through
+#     cloud-init user-data. User-data stays readable from the Droplet's
+#     metadata service (169.254.169.254) and from the DigitalOcean API for
+#     the lifetime of the Droplet. Use the Terraform stack with a secret
+#     manager (deploy/aws, deploy/gcp) if that is not acceptable, or rotate
+#     the keys after first boot.
+#   * The gateway is served over plain HTTP on :8080. Put a TLS-terminating
+#     reverse proxy or DO Load Balancer in front before real use.
+#   * Restrict SSH/8080 to your own address with --allow-cidr.
 
 set -euo pipefail
 
@@ -23,8 +34,9 @@ DROPLET_NAME="astra"
 REGION="nyc1"
 SIZE="s-1vcpu-1gb"           # 1 vCPU, 1GB RAM — $6/mo
 IMAGE="ubuntu-24-04-x64"
+ALLOW_CIDR=""                # optional: restrict SSH + 8080 to this CIDR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="https://github.com/masecode67/open-agent.git"
+REPO_URL="https://github.com/Open-Astra/openastra.git"
 
 # ── Parse arguments ──────────────────────────────────────────────
 
@@ -34,13 +46,16 @@ while [[ $# -gt 0 ]]; do
     --region)  REGION="$2"; shift 2 ;;
     --size)    SIZE="$2"; shift 2 ;;
     --image)   IMAGE="$2"; shift 2 ;;
+    --allow-cidr) ALLOW_CIDR="$2"; shift 2 ;;
     --help|-h)
-      echo "Usage: $0 [--name NAME] [--region REGION] [--size SIZE]"
+      echo "Usage: $0 [--name NAME] [--region REGION] [--size SIZE] [--allow-cidr CIDR]"
       echo ""
       echo "Options:"
       echo "  --name    Droplet name (default: astra)"
       echo "  --region  DO region (default: nyc1)"
       echo "  --size    Droplet size (default: s-1vcpu-1gb)"
+      echo "  --allow-cidr  Only allow SSH and :8080 from this CIDR (e.g. 203.0.113.4/32)."
+      echo "                Default: open to the internet (a warning is printed)."
       echo ""
       echo "Sizes:"
       echo "  s-1vcpu-1gb     \$6/mo    — lightweight (scheduler + 2-3 agents)"
@@ -83,10 +98,11 @@ echo "Enter your API keys. Press Enter to skip optional ones."
 echo ""
 
 # Required: at least one LLM provider
-read -rp "  Gemini API key (recommended): " GEMINI_API_KEY
-read -rp "  Anthropic API key (optional): " ANTHROPIC_API_KEY
-read -rp "  OpenAI API key (optional):    " OPENAI_API_KEY
-read -rp "  Grok API key (optional):      " GROK_API_KEY
+# -s: do not echo secrets to the terminal / scrollback.
+read -rsp "  Gemini API key (recommended): " GEMINI_API_KEY; echo
+read -rsp "  Anthropic API key (optional): " ANTHROPIC_API_KEY; echo
+read -rsp "  OpenAI API key (optional):    " OPENAI_API_KEY; echo
+read -rsp "  Grok API key (optional):      " GROK_API_KEY; echo
 
 if [[ -z "$GEMINI_API_KEY" && -z "$ANTHROPIC_API_KEY" && -z "$OPENAI_API_KEY" && -z "$GROK_API_KEY" ]]; then
   echo ""
@@ -96,20 +112,42 @@ fi
 
 echo ""
 echo "Optional services (press Enter to skip):"
-read -rp "  Telegram bot token:    " TELEGRAM_BOT_TOKEN
-read -rp "  Sanity project ID:     " SANITY_PROJECT_ID
-read -rp "  Sanity API token:      " SANITY_API_TOKEN
+read -rsp "  Telegram bot token:    " TELEGRAM_BOT_TOKEN; echo
+
+# Keys are interpolated into a YAML heredoc below — reject characters that
+# could break out of it or inject shell/YAML.
+for _v in GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GROK_API_KEY TELEGRAM_BOT_TOKEN; do
+  if [[ -n "${!_v}" && ! "${!_v}" =~ ^[A-Za-z0-9._:/+=-]+$ ]]; then
+    echo "Error: ${_v} contains unexpected characters." >&2
+    exit 1
+  fi
+done
+if [[ -n "$ALLOW_CIDR" && ! "$ALLOW_CIDR" =~ ^[0-9a-fA-F.:]+/[0-9]{1,3}$ ]]; then
+  echo "Error: --allow-cidr must be a CIDR such as 203.0.113.4/32" >&2
+  exit 1
+fi
+if [[ -z "$ALLOW_CIDR" ]]; then
+  echo ""
+  echo "WARNING: SSH and :8080 will be open to the whole internet."
+  echo "         Re-run with --allow-cidr <your-ip>/32 to restrict them."
+  UFW_SSH_RULE="ufw allow ssh"
+  UFW_APP_RULE="ufw allow 8080/tcp"
+else
+  UFW_SSH_RULE="ufw allow from ${ALLOW_CIDR} to any port 22 proto tcp"
+  UFW_APP_RULE="ufw allow from ${ALLOW_CIDR} to any port 8080 proto tcp"
+fi
 
 # ── Generate secrets ────────────────────────────────────────────
 
 JWT_SECRET=$(openssl rand -hex 32)
-INTERNAL_API_KEY=$(openssl rand -hex 24)
-TYPESENSE_API_KEY=$(openssl rand -hex 16)
-PG_PASSWORD=$(openssl rand -hex 16)
+INTERNAL_API_KEY=$(openssl rand -hex 32)
+TYPESENSE_API_KEY=$(openssl rand -hex 24)
+PG_PASSWORD=$(openssl rand -hex 24)
 
 # ── Build cloud-init ────────────────────────────────────────────
 
-CLOUD_INIT=$(mktemp /tmp/astra-cloud-init.XXXXXX.yml)
+umask 077
+CLOUD_INIT=$(mktemp "${TMPDIR:-/tmp}/astra-cloud-init.XXXXXX")
 trap 'rm -f "$CLOUD_INIT"' EXIT
 
 cat > "$CLOUD_INIT" << CLOUDINIT
@@ -151,7 +189,9 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  - path: /opt/astra/.env
+  # Written outside /opt/astra: git clone refuses a non-empty directory.
+  # runcmd moves it into place after the clone.
+  - path: /root/astra.env
     permissions: "0600"
     content: |
       # ── Astra Environment (auto-generated) ──────────────────
@@ -187,23 +227,21 @@ write_files:
       # Messaging
       TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 
-      # Sanity CMS
-      SANITY_PROJECT_ID=${SANITY_PROJECT_ID}
-      SANITY_API_TOKEN=${SANITY_API_TOKEN}
-      SANITY_DATASET=production
-
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
   - systemctl start docker
 
   - git clone ${REPO_URL} /opt/astra
+  - install -m 0600 /root/astra.env /opt/astra/.env
+  - rm -f /root/astra.env
 
-  # Firewall
+  # Firewall. Docker-published ports bypass ufw; docker-compose.yml binds
+  # Postgres/Typesense to 127.0.0.1 so they are never reachable externally.
   - ufw default deny incoming
   - ufw default allow outgoing
-  - ufw allow ssh
-  - ufw allow 8080/tcp
+  - ${UFW_SSH_RULE}
+  - ${UFW_APP_RULE}
   - ufw --force enable
 
   - systemctl enable fail2ban

@@ -1,6 +1,42 @@
+# Dependencies / build output
 node_modules
 dist
+coverage
+*.log
+*.tsbuildinfo
+
+# Secrets and credentials — never send to the build context
 .env
-.env.local
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+credentials.json
+service-account*.json
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+# VCS / tooling
 .git
+.github
 .claude
+.codex
+.playwright-mcp
+.DS_Store
+
+# Not needed by the gateway image
+dashboard
+tests
+deploy
+helm
+k8s
+images
+scripts
+*.md
+!SOUL.md
+!prompts/**

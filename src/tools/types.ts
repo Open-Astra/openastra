@@ -43,6 +43,8 @@ export interface ToolContext {
     maxTokens?: number;
   };
   metadata?: Record<string, unknown>;      // Feature 20: guard metadata (role, etc.)
+  /** Tool names denied by the calling agent's policy (deny always wins). */
+  deniedTools?: string[];
 }
 
 // ── Tool Call (from LLM) ────────────────────────────────────────────
@@ -79,9 +81,12 @@ export function resolveToolPolicy(
 ): ToolPolicy {
   const allow = new Set([...globalAllow, ...agentAllow]);
   const deny = new Set(agentDeny);
-  // Deny takes precedence
-  for (const d of deny) {
-    allow.delete(d);
+  // Deny takes precedence. Names are compared with hyphens and underscores
+  // treated as equivalent so `deny: [shell-execute]` blocks `shell_execute`.
+  const normalize = (n: string): string => n.trim().toLowerCase().replace(/-/g, "_");
+  const denyNorm = new Set([...deny].map(normalize));
+  for (const a of [...allow]) {
+    if (denyNorm.has(normalize(a))) allow.delete(a);
   }
   return { allow, deny };
 }

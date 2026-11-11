@@ -21,7 +21,7 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request, Response } from "express";
+import type { IRouter, Request, Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const log = createLogger("teams");
@@ -88,7 +88,7 @@ export class TeamsAdapter implements ChannelAdapter {
   private appId: string;
   private appPassword: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
 
   // Cached outgoing token (client_credentials grant)
   private cachedToken: string | null = null;
@@ -98,7 +98,7 @@ export class TeamsAdapter implements ChannelAdapter {
     appId: string,
     appPassword: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.appId = appId;
     this.appPassword = appPassword;
@@ -328,7 +328,7 @@ export function startTeamsChannel(
   appId: string,
   appPassword: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new TeamsAdapter(appId, appPassword, resolveClient, app);
   _adapter.start();

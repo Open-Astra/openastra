@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { WorkspaceAwareRequest } from "../middleware/workspace.js";
+import { platformAdmin, isPlatformAdmin } from "../middleware/platform-admin.js";
 import {
   listDlqEntries,
   replayDlqEntry,
@@ -23,8 +24,14 @@ const ListDlqQuery = z.object({
 });
 
 const PurgeQuery = z.object({
-  olderThanDays: z.coerce.number().int().min(1).default(30),
+  olderThanDays: z.coerce.number().int().min(1).max(3650).default(30),
 });
+
+const EntryId = z.string().min(1).max(128);
+
+// DLQ entries are addressed by bare id and the queue is shared by every
+// tenant, so everything except the workspace-scoped listing is restricted
+// to the platform operator (INTERNAL_API_KEY in X-Api-Key).
 
 export function createDlqRouter(): Router {
   const router = Router();
@@ -46,6 +53,11 @@ export function createDlqRouter(): Router {
         const entries = await listDlqEntries(workspaceId, parsed.data.limit);
         res.json({ entries, total: entries.length });
       } else {
+        // The unscoped list spans all tenants
+        if (!isPlatformAdmin(req)) {
+          res.status(403).json({ error: "Workspace required (or platform admin key for the global queue)" });
+          return;
+        }
         const result = await getDLQJobs(parsed.data.limit, parsed.data.offset);
         res.json(result);
       }
@@ -56,8 +68,10 @@ export function createDlqRouter(): Router {
   });
 
   // POST /jobs/dlq/:id/retry — move DLQ entry back to main queue for retry
-  router.post("/:id/retry", async (req: Request, res: Response) => {
-    const entryId = req.params.id as string;
+  router.post("/:id/retry", platformAdmin(), async (req: Request, res: Response) => {
+    const idParsed = EntryId.safeParse(req.params.id);
+    if (!idParsed.success) { res.status(400).json({ error: "Invalid id" }); return; }
+    const entryId = idParsed.data;
 
     try {
       const newJobId = await retryDLQJob(entryId);
@@ -74,7 +88,7 @@ export function createDlqRouter(): Router {
   });
 
   // POST /jobs/dlq/:id/replay — re-enqueue a failed job (legacy endpoint)
-  router.post("/:id/replay", async (req: Request, res: Response) => {
+  router.post("/:id/replay", platformAdmin(), async (req: Request, res: Response) => {
     const workspace = (req as unknown as WorkspaceAwareRequest).workspace;
     const workspaceId = workspace?.workspaceId;
 
@@ -100,8 +114,10 @@ export function createDlqRouter(): Router {
   });
 
   // POST /jobs/dlq/:id/resolve — mark DLQ entry as resolved
-  router.post("/:id/resolve", async (req: Request, res: Response) => {
-    const entryId = req.params.id as string;
+  router.post("/:id/resolve", platformAdmin(), async (req: Request, res: Response) => {
+    const idParsed = EntryId.safeParse(req.params.id);
+    if (!idParsed.success) { res.status(400).json({ error: "Invalid id" }); return; }
+    const entryId = idParsed.data;
 
     try {
       await resolveDlqEntry(entryId);
@@ -118,7 +134,7 @@ export function createDlqRouter(): Router {
   });
 
   // DELETE /jobs/dlq/purge — purge old DLQ entries
-  router.delete("/purge", async (req: Request, res: Response) => {
+  router.delete("/purge", platformAdmin(), async (req: Request, res: Response) => {
     const parsed = PurgeQuery.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid query", details: parsed.error.format() });

@@ -16,6 +16,10 @@ import {
 } from "../../agents/config-store.js";
 import { getSkillToolNames, getAllSkills } from "../../skills/registry.js";
 import { etagCache } from "../middleware/etag-cache.js";
+import { requireRole } from "../middleware/rbac.js";
+import { isPlatformAdmin } from "../middleware/platform-admin.js";
+import { checkModelEndpoint } from "../middleware/model-endpoint.js";
+import { findHostAccessTools, tenantsMayGrantHostTools } from "../middleware/host-tools.js";
 
 // ── Request Validation ──────────────────────────────────────────────
 
@@ -85,11 +89,46 @@ const UpdateAgentBody = z.object({
 
 // ── Agents Router ───────────────────────────────────────────────────
 
+/** Reject caller-supplied model endpoints (key exfiltration / SSRF). */
+async function rejectUnsafeEndpoint(
+  req: Request,
+  res: Response,
+  model: { provider: string; endpoint?: string | null } | undefined,
+): Promise<boolean> {
+  const reason = await checkModelEndpoint(model, { isAdmin: isPlatformAdmin(req) });
+  if (!reason) return false;
+  res.status(403).json({ error: reason });
+  return true;
+}
+
+/**
+ * Reject agent configs that grant host-access tools (shell, code, files,
+ * raw SQL…) unless the caller is a platform admin or the operator has
+ * opted in with ALLOW_TENANT_HOST_TOOLS=true. Skills are expanded first —
+ * a skill is just another way of granting its tools.
+ */
+function rejectHostTools(
+  req: Request,
+  res: Response,
+  tools: { allow: string[] } | undefined,
+  skills: string[] | undefined,
+): boolean {
+  if (tenantsMayGrantHostTools() || isPlatformAdmin(req)) return false;
+  const granted = [...(tools?.allow ?? []), ...getSkillToolNames(skills ?? [])];
+  const hits = findHostAccessTools(granted);
+  if (hits.length === 0) return false;
+  res.status(403).json({
+    error: "This agent grants host-access tools, which requires the platform admin key",
+    tools: [...new Set(hits)],
+  });
+  return true;
+}
+
 export function createAgentsRouter(): Router {
   const router = Router();
 
   // POST /agents — create agent
-  router.post("/", async (req: Request, res: Response) => {
+  router.post("/", requireRole("editor"), async (req: Request, res: Response) => {
     const { uid } = req as AuthenticatedRequest;
     const workspace = (req as WorkspaceAwareRequest).workspace;
     const workspaceId = workspace?.workspaceId;
@@ -104,6 +143,9 @@ export function createAgentsRouter(): Router {
       res.status(400).json({ error: "Invalid request", details: parsed.error.format() });
       return;
     }
+
+    if (await rejectUnsafeEndpoint(req, res, parsed.data.model)) return;
+    if (rejectHostTools(req, res, parsed.data.tools, parsed.data.skills)) return;
 
     try {
       const config: AgentConfig = parsed.data as AgentConfig;
@@ -211,7 +253,7 @@ export function createAgentsRouter(): Router {
   });
 
   // PUT /agents/:id — update agent config
-  router.put("/:id", async (req: Request, res: Response) => {
+  router.put("/:id", requireRole("editor"), async (req: Request, res: Response) => {
     const { uid } = req as AuthenticatedRequest;
     const { id } = req.params as { id: string };
     const workspaceId = (req as WorkspaceAwareRequest).workspace?.workspaceId ?? null;
@@ -225,6 +267,17 @@ export function createAgentsRouter(): Router {
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request", details: parsed.error.format() });
       return;
+    }
+
+    if (await rejectUnsafeEndpoint(req, res, parsed.data.model)) return;
+    if (parsed.data.tools || parsed.data.skills) {
+      // Evaluate the config as it will be after the update
+      const current = await getAgentConfigById(id, workspaceId).catch(() => null);
+      if (!current) {
+        res.status(404).json({ error: `Agent "${id}" not found` });
+        return;
+      }
+      if (rejectHostTools(req, res, parsed.data.tools ?? current.tools, parsed.data.skills ?? current.skills)) return;
     }
 
     try {
@@ -241,7 +294,7 @@ export function createAgentsRouter(): Router {
   });
 
   // DELETE /agents/:id — delete agent config
-  router.delete("/:id", async (req: Request, res: Response) => {
+  router.delete("/:id", requireRole("editor"), async (req: Request, res: Response) => {
     const { id } = req.params as { id: string };
     const workspaceId = (req as WorkspaceAwareRequest).workspace?.workspaceId ?? null;
 
@@ -309,7 +362,7 @@ export function createAgentsRouter(): Router {
   });
 
   // POST /agents/:id/versions/:version/rollback — restore agent to a historical version
-  router.post("/:id/versions/:version/rollback", async (req: Request, res: Response) => {
+  router.post("/:id/versions/:version/rollback", requireRole("editor"), async (req: Request, res: Response) => {
     const { uid } = req as AuthenticatedRequest;
     const { id, version } = req.params as { id: string; version: string };
     const workspace = (req as WorkspaceAwareRequest).workspace;
@@ -329,6 +382,9 @@ export function createAgentsRouter(): Router {
         res.status(404).json({ error: `Version ${versionNum} not found` });
         return;
       }
+      // A stored version may predate endpoint validation
+      if (await rejectUnsafeEndpoint(req, res, historicalConfig.model)) return;
+      if (rejectHostTools(req, res, historicalConfig.tools, historicalConfig.skills)) return;
       const updated = await updateAgentConfig(id, {
         displayName: historicalConfig.displayName,
         tier: historicalConfig.tier,
@@ -388,7 +444,7 @@ export function createAgentsRouter(): Router {
   });
 
   // PATCH /agents/:id/versions/:version — update a version's label
-  router.patch("/:id/versions/:version", async (req: Request, res: Response) => {
+  router.patch("/:id/versions/:version", requireRole("editor"), async (req: Request, res: Response) => {
     const { id, version } = req.params as { id: string; version: string };
     const workspace = (req as WorkspaceAwareRequest).workspace;
     const workspaceId = workspace?.workspaceId;

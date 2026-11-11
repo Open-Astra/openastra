@@ -86,8 +86,9 @@ describe("SQL Blocked Schemas", () => {
 // ── Table Allowlist ──────────────────────────────────────────────────
 
 describe("SQL Table Allowlist", () => {
-  it("allows daily_memories", () => {
-    expect(ALLOWED_TABLES.has("daily_memories")).toBe(true);
+  it("allows daily_memory (the real table; daily_memories never existed)", () => {
+    expect(ALLOWED_TABLES.has("daily_memory")).toBe(true);
+    expect(ALLOWED_TABLES.has("daily_memories")).toBe(false);
   });
 
   it("allows graph_entities", () => {
@@ -98,8 +99,9 @@ describe("SQL Table Allowlist", () => {
     expect(ALLOWED_TABLES.has("graph_edges")).toBe(true);
   });
 
-  it("allows session_messages", () => {
-    expect(ALLOWED_TABLES.has("session_messages")).toBe(true);
+  it("allows messages (scoped through the caller's sessions)", () => {
+    expect(ALLOWED_TABLES.has("messages")).toBe(true);
+    expect(ALLOWED_TABLES.has("session_messages")).toBe(false);
   });
 
   it("allows procedural_memory", () => {
@@ -133,10 +135,10 @@ describe("SQL Structural Validation", () => {
     expect(subqueryPattern.test("SELECT * FROM daily_memories WHERE id IN (SELECT id FROM users)")).toBe(true);
   });
 
-  it("detects comma-join to disallowed table in FROM clause", () => {
-    // The tool extracts all tables from FROM clause including comma-joins
-    // and validates each against ALLOWED_TABLES.
-    // This test verifies the disallowed table would be caught.
-    expect(ALLOWED_TABLES.has("billing_usage")).toBe(false);
+  it("does not expose tables without a tenant-scoping column", () => {
+    // Every queryable table must have a per-user / per-workspace predicate
+    // in sql-guard.ts; secrets and audit tables have none and stay out.
+    expect(ALLOWED_TABLES.has("workspace_secrets")).toBe(false);
+    expect(ALLOWED_TABLES.has("agent_credentials")).toBe(false);
   });
 });

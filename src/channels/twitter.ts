@@ -22,8 +22,9 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request, Response } from "express";
-import { createHmac, timingSafeEqual, randomBytes } from "node:crypto";
+import type { IRouter, Request, Response } from "express";
+import { createHmac, randomBytes } from "node:crypto";
+import { getRawBody, safeEqual } from "./webhook-verify.js";
 
 const log = createLogger("twitter");
 
@@ -71,7 +72,7 @@ export class TwitterAdapter implements ChannelAdapter {
   private bearerToken: string;
   private webhookEnv: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private botUserId: string | null = null;
 
   constructor(
@@ -82,7 +83,7 @@ export class TwitterAdapter implements ChannelAdapter {
     bearerToken: string,
     webhookEnv: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.apiKey = apiKey;
     this.apiSecret = apiSecret;
@@ -156,14 +157,11 @@ export class TwitterAdapter implements ChannelAdapter {
       | undefined;
     if (!signature) return false;
 
-    const rawBody = JSON.stringify(req.body);
+    const rawBody = getRawBody(req);
+    if (!rawBody) return false;
     const expected = `sha256=${createHmac("sha256", this.apiSecret).update(rawBody).digest("base64")}`;
 
-    try {
-      return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-    } catch {
-      return false;
-    }
+    return safeEqual(signature, expected);
   }
 
   // ── ChannelAdapter Interface ────────────────────────────────────
@@ -331,7 +329,7 @@ export function startTwitterChannel(
   bearerToken: string,
   webhookEnv: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new TwitterAdapter(
     apiKey,

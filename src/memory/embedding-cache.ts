@@ -47,7 +47,8 @@ export async function getCachedEmbedding(text: string): Promise<number[] | null>
       "Embedding cache read failed:",
       err instanceof Error ? err.message : String(err),
     );
-    throw err;
+    // A cache read failure is a miss, not an error — the caller re-embeds.
+    return null;
   }
 
   if (rows.length === 0) return null;
@@ -75,7 +76,12 @@ export async function setCachedEmbedding(text: string, embedding: number[]): Pro
   lruCache.set(hash, embedding);
 
   // Layer 2: Postgres — queue via batcher to coalesce writes within 100ms window
-  await queueEmbeddingWrite(hash, embedding);
+  // Fire-and-forget: the LRU already has the value, callers must not block on Postgres.
+  void Promise.resolve()
+    .then(() => queueEmbeddingWrite(hash, embedding))
+    .catch((err: unknown) => {
+      log.error("Embedding cache write failed:", err instanceof Error ? err.message : String(err));
+    });
 }
 
 function evictIfFull(): void {

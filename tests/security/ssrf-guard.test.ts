@@ -20,7 +20,7 @@ vi.mock("../../src/security/intrusion-detection.js", () => ({
 }));
 
 // ── Import after mocks ─────────────────────────────────────────────
-import { isBlockedUrl, safeFetch } from "../../src/utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch, isBlockedIp } from "../../src/utils/ssrf-guard.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -318,5 +318,72 @@ describe("isBlockedUrl", () => {
       mockResolve6.mockResolvedValue(["fd12::1"]);
       expect(await isBlockedUrl("http://v6-fd.example.com/")).toBe(true);
     });
+  });
+});
+
+// ── Address ranges added by the audit ───────────────────────────────
+
+describe("isBlockedIp — complete internal ranges", () => {
+  it("blocks carrier-grade NAT 100.64.0.0/10", () => {
+    expect(isBlockedIp("100.64.0.1")).toBe(true);
+    expect(isBlockedIp("100.100.100.200")).toBe(true); // Alibaba metadata
+    expect(isBlockedIp("100.127.255.255")).toBe(true);
+    expect(isBlockedIp("100.63.255.255")).toBe(false);
+    expect(isBlockedIp("100.128.0.1")).toBe(false);
+  });
+
+  it("blocks all of fc00::/7, not just the fc00: prefix", () => {
+    for (const ip of ["fc00::1", "fc01::1", "fcff:1::2", "fd00::1", "fdab:cdef::1"]) {
+      expect(isBlockedIp(ip), ip).toBe(true);
+    }
+  });
+
+  it("blocks all of fe80::/10 link-local", () => {
+    for (const ip of ["fe80::1", "fe81::1", "fe90::1", "febf::1"]) {
+      expect(isBlockedIp(ip), ip).toBe(true);
+    }
+  });
+
+  it("blocks IPv4 embedded in IPv6 (mapped, NAT64, 6to4)", () => {
+    expect(isBlockedIp("::ffff:127.0.0.1")).toBe(true);
+    expect(isBlockedIp("::ffff:7f00:1")).toBe(true);
+    expect(isBlockedIp("::ffff:169.254.169.254")).toBe(true);
+    expect(isBlockedIp("64:ff9b::7f00:1")).toBe(true);        // NAT64 → 127.0.0.1
+    expect(isBlockedIp("64:ff9b::a9fe:a9fe")).toBe(true);     // NAT64 → 169.254.169.254
+    expect(isBlockedIp("64:ff9b:1::1")).toBe(true);           // local-use NAT64
+    expect(isBlockedIp("2002:7f00:1::1")).toBe(true);         // 6to4 → 127.0.0.1
+    expect(isBlockedIp("2002:c0a8:101::1")).toBe(true);       // 6to4 → 192.168.1.1
+  });
+
+  it("allows ordinary public addresses and fails closed on garbage", () => {
+    expect(isBlockedIp("93.184.216.34")).toBe(false);
+    expect(isBlockedIp("2606:4700:4700::1111")).toBe(false);
+    expect(isBlockedIp("64:ff9b::5db8:d822")).toBe(false);    // NAT64 → public
+    expect(isBlockedIp("not-an-ip")).toBe(true);
+    expect(isBlockedIp("")).toBe(true);
+  });
+});
+
+describe("isBlockedUrl — additional hardening", () => {
+  it("blocks DNS answers in the newly covered ranges", async () => {
+    dnsRoundRobin(["100.64.10.10"]);
+    expect(await isBlockedUrl("https://cgnat.example.com/")).toBe(true);
+    dnsResolvesTo([], ["fe90::1"]);
+    mockResolve4.mockRejectedValue(new Error("no A"));
+    expect(await isBlockedUrl("https://ll.example.com/")).toBe(true);
+  });
+
+  it("blocks internal-only names and URLs carrying credentials", async () => {
+    dnsResolvesTo();
+    expect(await isBlockedUrl("http://kubernetes.default.svc/")).toBe(true);
+    expect(await isBlockedUrl("http://db.internal/")).toBe(true);
+    expect(await isBlockedUrl("http://printer.local/")).toBe(true);
+    expect(await isBlockedUrl("https://user:pass@example.com/")).toBe(true);
+  });
+
+  it("safeFetch refuses blocked targets before connecting", async () => {
+    await expect(safeFetch("http://[fd00::1]/")).rejects.toThrow(/SSRF/);
+    await expect(safeFetch("http://100.64.0.1/")).rejects.toThrow(/SSRF/);
+    await expect(safeFetch("http://[64:ff9b::7f00:1]/")).rejects.toThrow(/SSRF/);
   });
 });

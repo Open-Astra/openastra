@@ -184,7 +184,7 @@ async function scanResources(provider: string, region: string, type: string): Pr
   return resources;
 }
 
-function getResourceTemplates(provider: string, type: string): Array<{ name: string; type: string; baseCost: number }> {
+function getResourceTemplates(_provider: string, type: string): Array<{ name: string; type: string; baseCost: number }> {
   const templates: Record<string, Array<{ name: string; type: string; baseCost: number }>> = {
     compute: [
       { name: "api-server-1", type: "ec2/vm", baseCost: 150 },

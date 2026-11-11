@@ -21,6 +21,10 @@ let accessExpires: string;
 let refreshExpires: string;
 let bindToDevice: boolean = false;
 
+// Only HS256 tokens are ever issued; pin verification to it so a token
+// with a different (or "none") algorithm is rejected outright.
+const VERIFY_OPTIONS: jose.JWTVerifyOptions = { algorithms: ["HS256"] };
+
 export function initJwt(config: {
   jwtSecret: string;
   jwtSecretPrev?: string;
@@ -81,11 +85,11 @@ export async function verifyAccessToken(
   let payload: jose.JWTPayload;
 
   try {
-    ({ payload } = await jose.jwtVerify(token, secret));
+    ({ payload } = await jose.jwtVerify(token, secret, VERIFY_OPTIONS));
   } catch (primaryErr) {
     if (!prevSecret) throw primaryErr;
     // Attempt verification with previous secret for rotation support
-    ({ payload } = await jose.jwtVerify(token, prevSecret));
+    ({ payload } = await jose.jwtVerify(token, prevSecret, VERIFY_OPTIONS));
   }
 
   const uid = payload.sub ?? (payload.uid as string | undefined);
@@ -96,11 +100,15 @@ export async function verifyAccessToken(
     throw new Error("Refresh token cannot be used as access token");
   }
 
-  // Device fingerprint validation
-  if (fingerprint && payload.dfp !== undefined) {
-    if (payload.dfp !== fingerprint) {
+  // Device fingerprint validation. When binding is enabled the claim is
+  // mandatory — a token without it (or presented without a fingerprint)
+  // is rejected rather than silently accepted.
+  if (bindToDevice) {
+    if (!fingerprint || payload.dfp !== fingerprint) {
       throw new Error("Token device fingerprint mismatch");
     }
+  } else if (fingerprint && payload.dfp !== undefined && payload.dfp !== fingerprint) {
+    throw new Error("Token device fingerprint mismatch");
   }
 
   // JTI revocation check — reject tokens that have been explicitly revoked
@@ -112,13 +120,16 @@ export async function verifyAccessToken(
       throw new Error("Token has been revoked");
     }
   }
-  // Check sentinel revocation for this user (covers revokeAllAccessTokens)
-  const sentinelRevoked = await isTokenRevoked(`all:${uid}`);
-  if (sentinelRevoked) {
-    // Only reject if the token was issued before the sentinel was created
-    // (iat < sentinel.revoked_at). For simplicity, we always reject since
-    // the sentinel exp is set to max access token lifetime from revocation time.
-    throw new Error("All tokens for this user have been revoked");
+  // Check sentinel revocation for this user (covers revokeAllAccessTokens).
+  // Only tokens issued at or before the revocation are rejected, so a user
+  // can log in again immediately after logout / a forced sign-out.
+  const revokedAt = await getBulkRevocationTime(uid);
+  if (revokedAt !== null) {
+    const issuedAtMs = (payload.iat ?? 0) * 1000;
+    // iat has 1s resolution — treat the whole second of revocation as revoked
+    if (issuedAtMs <= revokedAt) {
+      throw new Error("All tokens for this user have been revoked");
+    }
   }
 
   return { uid };
@@ -132,10 +143,10 @@ export async function verifyRefreshToken(token: string): Promise<{ uid: string }
   let payload: jose.JWTPayload;
 
   try {
-    ({ payload } = await jose.jwtVerify(token, secret));
+    ({ payload } = await jose.jwtVerify(token, secret, VERIFY_OPTIONS));
   } catch (primaryErr) {
     if (!prevSecret) throw primaryErr;
-    ({ payload } = await jose.jwtVerify(token, prevSecret));
+    ({ payload } = await jose.jwtVerify(token, prevSecret, VERIFY_OPTIONS));
   }
 
   const uid = payload.sub ?? (payload.uid as string | undefined);
@@ -195,6 +206,26 @@ export async function isTokenRevoked(jti: string): Promise<boolean> {
     // token. Availability is less critical than allowing revoked tokens.
     log.error("Revocation check failed (fail-closed):", err);
     return true;
+  }
+}
+
+/**
+ * When were all of this user's access tokens revoked? Returns the
+ * revocation time in ms, or null if there is no active bulk revocation.
+ * Fails closed (returns "now") if the table is unreachable.
+ */
+async function getBulkRevocationTime(uid: string): Promise<number | null> {
+  try {
+    const { rows } = await getPool().query<{ revoked_at: Date | null }>(
+      "SELECT revoked_at FROM revoked_tokens WHERE jti = $1 AND exp > NOW()",
+      [`all:${uid}`],
+    );
+    if (rows.length === 0) return null;
+    const at = rows[0]!.revoked_at;
+    return at ? new Date(at).getTime() : Date.now();
+  } catch (err) {
+    log.error("Bulk revocation check failed (fail-closed):", err);
+    return Date.now();
   }
 }
 

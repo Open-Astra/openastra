@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { writeFile, readFile } from "node:fs/promises";
-import { resolve, normalize } from "node:path";
+import { tryGuardPath } from "./path-guard.js";
 import { registerTool } from "./registry.js";
 import { getPool } from "../config/postgres.js";
 import type { DailyMemoryEntry, MemoryProfile } from "../memory/types.js";
@@ -34,7 +34,13 @@ registerTool({
   parameters: MemoryExportParams,
   async execute(params, ctx) {
     const pool = getPool();
-    const filePath = resolve(normalize(params.path));
+    // Exports stay inside the working directory (no arbitrary absolute paths,
+    // no symlink escapes, no overwriting code/config or secret files).
+    const guardedPath = tryGuardPath(params.path, { access: "write", agentId: ctx?.agentId });
+    if (!guardedPath.ok) {
+      return { error: guardedPath.error };
+    }
+    const filePath = guardedPath.path;
     const exportData: Record<string, unknown> = {
       version: 1,
       exportedAt: new Date().toISOString(),
@@ -150,7 +156,11 @@ registerTool({
     "Import memory from a previously exported JSON file. Merges with existing memory (additive, does not overwrite). Supports dry-run mode to preview changes before applying. Use for restoring backups or migrating memory between instances.",
   parameters: MemoryImportParams,
   async execute(params, ctx) {
-    const filePath = resolve(normalize(params.path));
+    const guardedPath = tryGuardPath(params.path, { access: "read", agentId: ctx?.agentId });
+    if (!guardedPath.ok) {
+      return { error: guardedPath.error };
+    }
+    const filePath = guardedPath.path;
     const raw = await readFile(filePath, "utf-8");
     const data = JSON.parse(raw) as {
       version: number;

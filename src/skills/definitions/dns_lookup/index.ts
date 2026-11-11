@@ -2,6 +2,16 @@ import { z } from "zod";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
 import * as dns from "node:dns/promises";
+import { isBlockedIp } from "../../../utils/ssrf-guard.js";
+
+// The gateway's resolver can see split-horizon / cluster DNS. These tools
+// must not become a way to enumerate internal names and addresses.
+const INTERNAL_NAME = /(^|\.)(localhost|local|internal|intranet|lan|corp|home|svc|cluster\.local|in-addr\.arpa|ip6\.arpa)\.?$/i;
+const VALID_DOMAIN = /^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\.?$/i;
+
+function publicOnly(ips: string[]): string[] {
+  return ips.filter((ip) => !isBlockedIp(ip));
+}
 
 // ── DNS Lookup Skill ────────────────────────────────────────────────
 // DNS record lookups: A, AAAA, MX, TXT, CNAME, NS, SOA.
@@ -37,16 +47,19 @@ const dnsLookupSkill: SkillDefinition = {
       parameters: LookupParams,
 
       async execute(params) {
+        if (!VALID_DOMAIN.test(params.domain) || INTERNAL_NAME.test(params.domain)) {
+          return { domain: params.domain, error: "Only public DNS names can be queried." };
+        }
         const results: Record<string, unknown> = { domain: params.domain };
 
         for (const type of params.types) {
           try {
             switch (type) {
               case "A":
-                results.A = await dns.resolve4(params.domain);
+                results.A = publicOnly(await dns.resolve4(params.domain));
                 break;
               case "AAAA":
-                results.AAAA = await dns.resolve6(params.domain);
+                results.AAAA = publicOnly(await dns.resolve6(params.domain));
                 break;
               case "MX":
                 results.MX = (await dns.resolveMx(params.domain)).sort((a, b) => a.priority - b.priority);
@@ -79,6 +92,9 @@ const dnsLookupSkill: SkillDefinition = {
       parameters: ReverseLookupParams,
 
       async execute(params) {
+        if (isBlockedIp(params.ip)) {
+          return { ip: params.ip, error: "Reverse lookups are limited to public IP addresses." };
+        }
         try {
           const hostnames = await dns.reverse(params.ip);
           return { ip: params.ip, hostnames };

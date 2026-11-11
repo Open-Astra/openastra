@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
-import { join, basename } from "node:path";
+import { readdirSync, existsSync } from "node:fs";
+import { join, basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { GatewayPlugin, PluginContext } from "./types.js";
 import { createLogger } from "../utils/logger.js";
@@ -41,6 +42,19 @@ const DEFAULT_CONFIG: HotReloadConfig = {
   enabled: true,
 };
 
+// ── Safety Gate ─────────────────────────────────────────────────────
+// Hot-reload imports source files at runtime. Combined with any file-write
+// primitive (an agent tool, a compromised dependency) that is remote code
+// execution inside the gateway, so it is:
+//   - OFF unless the operator sets ASTRA_HOT_RELOAD=true, and
+//   - never active when NODE_ENV=production, and
+//   - limited to entry files that already existed when the watcher started
+//     (a brand-new plugin/skill directory is never imported).
+
+export function isHotReloadAllowed(): boolean {
+  return process.env.ASTRA_HOT_RELOAD === "true" && process.env.NODE_ENV !== "production";
+}
+
 // ── Hot Reloader ────────────────────────────────────────────────────
 
 export class PluginHotReloader {
@@ -49,6 +63,8 @@ export class PluginHotReloader {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private config: HotReloadConfig;
   private ctx: PluginContext | null = null;
+  /** Absolute entry files that existed at startup — the only importable ones. */
+  private knownEntryFiles = new Set<string>();
 
   constructor(config: Partial<HotReloadConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -59,7 +75,29 @@ export class PluginHotReloader {
    */
   start(ctx: PluginContext, existingPlugins: GatewayPlugin[] = []): void {
     if (!this.config.enabled) return;
+    if (!isHotReloadAllowed()) {
+      log.dim(
+        "Plugin hot-reload disabled (set ASTRA_HOT_RELOAD=true in a non-production environment to enable)",
+      );
+      return;
+    }
     this.ctx = ctx;
+
+    // Snapshot the entry files present right now.
+    for (const dir of this.config.pluginDirs) {
+      try {
+        if (!existsSync(dir)) continue;
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          for (const file of ["index.js", "index.ts"]) {
+            const candidate = resolve(dir, entry.name, file);
+            if (existsSync(candidate)) this.knownEntryFiles.add(candidate);
+          }
+        }
+      } catch (err) {
+        log.dim(`Cannot snapshot ${dir}: ${err}`);
+      }
+    }
 
     // Register existing plugins
     for (const plugin of existingPlugins) {
@@ -137,6 +175,7 @@ export class PluginHotReloader {
 
   private async reloadPlugin(pluginDir: string): Promise<void> {
     if (!this.ctx) return;
+    if (!isHotReloadAllowed()) return;
 
     const dirName = basename(pluginDir);
     log.info(`Reloading plugin: ${dirName}`);
@@ -144,7 +183,9 @@ export class PluginHotReloader {
     // Find the entry point
     let modulePath: string | undefined;
     for (const ext of ["index.js", "index.ts"]) {
-      const candidate = join(pluginDir, ext);
+      const candidate = resolve(join(pluginDir, ext));
+      // Never import a file that was not on disk when the watcher started.
+      if (!this.knownEntryFiles.has(candidate)) continue;
       try {
         await stat(candidate);
         modulePath = candidate;
@@ -155,7 +196,7 @@ export class PluginHotReloader {
     }
 
     if (!modulePath) {
-      log.dim(`No index file found in ${dirName}`);
+      log.warn(`Ignoring ${dirName}: no entry file that existed at startup (new files are never hot-loaded)`);
       return;
     }
 

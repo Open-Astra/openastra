@@ -136,7 +136,7 @@ async function getCompetitorKeywords(domain: string, limit: number): Promise<Arr
     try {
       const response = await safeFetch(
         `https://serpapi.com/search.json?engine=google&q=site:${domain}&api_key=${apiKey}&num=${Math.min(limit, 100)}`,
-        { timeout: 20_000 },
+        { timeoutMs: 20_000 },
       );
       const data = await response.json() as Record<string, unknown>;
       const results = (data.organic_results ?? []) as Array<{ title: string; position: number }>;

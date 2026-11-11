@@ -4,14 +4,17 @@
 // Uses its own HMAC-SHA256 verification against JIRA_WEBHOOK_SECRET.
 
 import { Router, type Request, type Response } from "express";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
+import { safeEqual, unsignedWebhooksAllowed } from "../../channels/webhook-verify.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("jira-channel");
 
 function verifyJiraSignature(req: Request): boolean {
   const secret = process.env.JIRA_WEBHOOK_SECRET;
-  if (!secret) return true; // not configured — skip verification
+  // Not configured → refuse. An unverified Jira webhook lets anyone drive
+  // the agent; ALLOW_UNSIGNED_WEBHOOKS=true opts in for local development.
+  if (!secret) return unsignedWebhooksAllowed();
 
   const signature = req.headers["x-hub-signature"] as string | undefined;
   if (!signature) return false;
@@ -20,11 +23,7 @@ function verifyJiraSignature(req: Request): boolean {
   if (!rawBody) return false;
 
   const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-  try {
-    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch {
-    return false;
-  }
+  return safeEqual(signature, expected);
 }
 
 export function createJiraRouter(): Router {

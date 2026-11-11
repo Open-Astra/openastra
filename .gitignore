@@ -7,6 +7,9 @@ coverage/
 # Environment and secrets
 .env
 .env.*
+# sops-encrypted env file is safe (and intended) to commit
+!.env.enc
+!.env.example
 .env.local
 .env.production
 .env.staging
@@ -35,3 +38,17 @@ service-account-key.json
 .claude/
 CLAUDE.md
 .playwright-mcp/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+
+# Local scratch scripts
+*-seed.mjs
+
+# Terraform state and variable files (contain secrets in plaintext)
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform/

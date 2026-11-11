@@ -20,7 +20,9 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express } from "express";
+import type { IRouter } from "express";
+import { createHmac } from "node:crypto";
+import { verifySharedSecret } from "./webhook-verify.js";
 
 const log = createLogger("imessage");
 
@@ -61,14 +63,14 @@ export class IMessageAdapter implements ChannelAdapter {
   private baseUrl: string;
   private password: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private processingChats = new Set<string>();
 
   constructor(
     baseUrl: string,
     password: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
     this.password = password;
@@ -126,6 +128,13 @@ export class IMessageAdapter implements ChannelAdapter {
     // Register webhook endpoint on the Express app
     if (this.app) {
       this.app.post("/webhooks/imessage", (req, res) => {
+        // BlueBubbles does not sign webhooks — require the shared secret
+        // carried in the registered URL (?secret=) or X-Webhook-Secret.
+        if (!verifySharedSecret(req, this.webhookSecret(), { allowQuery: true })) {
+          log.warn("Rejected iMessage webhook — missing or invalid secret");
+          res.sendStatus(403);
+          return;
+        }
         const payload = req.body as BBWebhookPayload;
         res.status(200).json({ ok: true });
 
@@ -140,7 +149,7 @@ export class IMessageAdapter implements ChannelAdapter {
     // Register ourselves as a webhook in BlueBubbles
     await this.registerWebhook().catch((err) => {
       log.warn("Could not auto-register webhook:", err.message);
-      log.warn("Manually add webhook URL in BlueBubbles: POST <gateway-url>/webhooks/imessage");
+      log.warn("Manually add webhook URL in BlueBubbles: POST <gateway-url>/webhooks/imessage?secret=<IMESSAGE_WEBHOOK_SECRET>");
     });
 
     log.active("iMessage channel started", `BlueBubbles: ${this.baseUrl}`);
@@ -152,6 +161,18 @@ export class IMessageAdapter implements ChannelAdapter {
 
   // ── Webhook Registration ───────────────────────────────────────
 
+  /**
+   * Secret BlueBubbles must present on inbound webhooks:
+   * IMESSAGE_WEBHOOK_SECRET, or a value derived from the BlueBubbles
+   * password (never the password itself, since it travels in a URL).
+   */
+  private webhookSecret(): string {
+    return (
+      process.env.IMESSAGE_WEBHOOK_SECRET ??
+      createHmac("sha256", this.password).update("astra-imessage-webhook").digest("hex")
+    );
+  }
+
   private async registerWebhook(): Promise<void> {
     const gatewayUrl = process.env.GATEWAY_URL;
     if (!gatewayUrl) {
@@ -159,7 +180,7 @@ export class IMessageAdapter implements ChannelAdapter {
     }
 
     await this.bbApi("POST", "/server/webhook", {
-      url: `${gatewayUrl}/webhooks/imessage`,
+      url: `${gatewayUrl}/webhooks/imessage?secret=${encodeURIComponent(this.webhookSecret())}`,
       events: ["new-message"],
     });
 
@@ -255,7 +276,7 @@ export function startIMessageChannel(
   baseUrl: string,
   password: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new IMessageAdapter(baseUrl, password, resolveClient, app);
   _adapter.start();

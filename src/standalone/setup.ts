@@ -12,7 +12,8 @@
 // TUI that walks you through every configuration option.
 
 import { createInterface } from "node:readline";
-import { writeFile, access } from "node:fs/promises";
+import { writeFile, access, open, chmod } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 // ── ANSI Helpers ───────────────────────────────────────────────────
@@ -299,7 +300,7 @@ async function main(): Promise<void> {
     `PG_PASSWORD=${config.pgPassword}`,
     "",
     "# Typesense",
-    "TYPESENSE_API_KEY=astra-typesense-key",
+    `TYPESENSE_API_KEY=${randomBytes(24).toString("hex")}`,
     "TYPESENSE_HOST=typesense",
     "TYPESENSE_PORT=8108",
     "",
@@ -320,16 +321,28 @@ async function main(): Promise<void> {
   }
 
   const envPath = join(cwd, ".env");
+  const envBody = envLines.join("\n") + "\n";
   let writeEnv = true;
   try {
-    await access(envPath);
+    // "wx" creates the file atomically and fails if it already exists, so the
+    // existence check and the write cannot be raced. .env holds every secret —
+    // owner read/write only.
+    const handle = await open(envPath, "wx", 0o600);
+    try {
+      await handle.writeFile(envBody);
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     writeEnv = await askYesNo(".env already exists. Overwrite?", false);
-  } catch {
-    // File doesn't exist — safe to write
+    if (writeEnv) {
+      await writeFile(envPath, envBody, { mode: 0o600 });
+      await chmod(envPath, 0o600).catch(() => {});
+    }
   }
 
   if (writeEnv) {
-    await writeFile(envPath, envLines.join("\n") + "\n");
     success("Generated .env");
   } else {
     warn("Skipped .env (already exists)");

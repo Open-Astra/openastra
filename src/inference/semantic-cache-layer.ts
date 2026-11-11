@@ -36,15 +36,21 @@ function extractQueryText(request: InferenceRequest): string | null {
 
 export function withSemanticCache(
   client: InferenceClient,
-  agentId: string,
 ): InferenceClient {
   return {
     async chat(request: InferenceRequest): Promise<InferenceResponse> {
+      // The cache is tenant data: without an explicit scope on the request
+      // (agent + uid + workspace) we never read or write it. Clients are
+      // shared between agents, so the agent id must come from the request too.
+      const scope = request.cacheScope;
+      if (!scope || !scope.uid || !scope.agentId) return client.chat(request);
+      const agentId = scope.agentId;
+
       // Only cache when there are no tool schemas (tool calls change behavior)
       const queryText = extractQueryText(request);
       if (queryText && (!request.tools || request.tools.length === 0)) {
         try {
-          const swrResult = await getStaleSemanticCache(queryText, agentId, SWR_MAX_AGE_MS);
+          const swrResult = await getStaleSemanticCache(queryText, agentId, SWR_MAX_AGE_MS, scope);
           if (swrResult) {
             const cachedResponse: InferenceResponse = {
               content: swrResult.content,
@@ -69,7 +75,7 @@ export function withSemanticCache(
               try {
                 const fresh = await client.chat(request);
                 if (fresh.content && fresh.toolCalls.length === 0) {
-                  await setSemanticCache(queryText, fresh.content, agentId);
+                  await setSemanticCache(queryText, fresh.content, agentId, scope);
                 }
               } catch {
                 // Background refresh failure is non-fatal
@@ -91,7 +97,7 @@ export function withSemanticCache(
         response.toolCalls.length === 0 &&
         (!request.tools || request.tools.length === 0)
       ) {
-        setSemanticCache(queryText, response.content, agentId).catch(() => {});
+        setSemanticCache(queryText, response.content, agentId, scope).catch(() => {});
       }
 
       return response;

@@ -149,7 +149,7 @@ async function checkCertificate(domain: string, alertDays: number, _checkOcsp: b
   // Attempt real TLS connection for basic validation
   let reachable = false;
   try {
-    await safeFetch(`https://${domain}`, { method: "HEAD", timeout: 10_000 });
+    await safeFetch(`https://${domain}`, { method: "HEAD", timeoutMs: 10_000 });
     reachable = true;
   } catch { /* unreachable, use simulated data */ }
 

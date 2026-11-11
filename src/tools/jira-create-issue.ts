@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
 import { getPool } from "../config/postgres.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── jira-create-issue ────────────────────────────────────────────────
 // Creates a Jira issue using the Jira REST API.
@@ -127,7 +127,7 @@ registerTool({
     }
 
     try {
-      const response = await fetch(createUrl, {
+      const response = await safeFetch(createUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

@@ -46,11 +46,13 @@ export function incrementClock(clock: VectorClock, nodeId: string): VectorClock 
 }
 
 export function mergeClock(a: VectorClock, b: VectorClock): VectorClock {
-  const merged: VectorClock = { ...a };
+  const merged = new Map<string, number>(Object.entries(a));
   for (const [key, val] of Object.entries(b)) {
-    merged[key] = Math.max(merged[key] ?? 0, val);
+    merged.set(key, Math.max(merged.get(key) ?? 0, val));
   }
-  return merged;
+  // Rebuild from entries so a client-supplied "__proto__" node id is a plain
+  // own property rather than a write to the object's prototype.
+  return Object.fromEntries(merged) as VectorClock;
 }
 
 /**

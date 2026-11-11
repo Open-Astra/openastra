@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 // ── post-pr-comment ──────────────────────────────────────────────────
 // Posts a review comment to a GitHub pull request via the GitHub REST API.
@@ -41,7 +41,7 @@ registerTool({
     }
 
     try {
-      const response = await fetch(commentUrl, {
+      const response = await safeFetch(commentUrl, {
         method: "POST",
         headers: {
           Accept: "application/vnd.github.v3+json",

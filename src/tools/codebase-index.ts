@@ -5,6 +5,7 @@ import { generateEmbedding } from "../memory/embeddings.js";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, extname, relative } from "node:path";
+import { tryGuardPath, isSecretPath } from "./path-guard.js";
 
 // ── codebase_index ─────────────────────────────────────────────────
 // Walk a repository, extract symbols, generate embeddings, and upsert
@@ -207,6 +208,14 @@ registerTool({
     const pool = getPool();
 
     // Ensure table exists (migration should handle this, but be safe)
+    // The repository must live inside the working directory / the agent's
+    // allowed paths — never an arbitrary host directory.
+    const guardedRepo = tryGuardPath(params.repoPath, { access: "list", agentId: ctx?.agentId });
+    if (!guardedRepo.ok) {
+      return { error: guardedRepo.error };
+    }
+    params = { ...params, repoPath: guardedRepo.path };
+
     const gitignorePatterns = await loadGitignore(params.repoPath);
     const filePaths: string[] = [];
 
@@ -240,6 +249,12 @@ registerTool({
       const relPath = relative(params.repoPath, fullPath).replace(/\\/g, "/");
       const ext = extname(fullPath).toLowerCase();
       const language = EXT_TO_LANG[ext] ?? ext.slice(1);
+
+      // Never index (and embed) secret material such as .env or key files.
+      if (isSecretPath(fullPath)) {
+        skipped++;
+        continue;
+      }
 
       let content: string;
       try {

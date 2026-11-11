@@ -28,7 +28,9 @@ export function rlsContext() {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const authReq = req as unknown as AuthenticatedRequest;
     const uid = authReq.uid ?? "";
-    const workspaceId = (authReq as unknown as Record<string, unknown>).workspaceId as string ?? "";
+    // workspaceResolver() attaches the context at req.workspace.workspaceId
+    const workspaceId =
+      (req as unknown as { workspace?: { workspaceId?: string | null } }).workspace?.workspaceId ?? "";
 
     let client: PoolClient | undefined;
 
@@ -61,13 +63,21 @@ export function rlsContext() {
 
       next();
     } catch (err) {
-      // If RLS setup fails (migration not run, pool exhausted, etc.),
-      // release the client and continue without RLS.
+      // RLS setup failed (migration not run, pool exhausted, etc.).
       if (client) {
         try { await client.query("ROLLBACK"); } catch { /* ignore */ }
         client.release();
       }
-      log.dim("RLS context setup failed — continuing without RLS");
+      // Fail closed in production: serving the request without the RLS
+      // session context would silently drop a tenant-isolation layer.
+      // RLS_FAIL_OPEN=true restores the old behaviour for installs that
+      // have not applied migration 040.
+      if (process.env.NODE_ENV === "production" && process.env.RLS_FAIL_OPEN !== "true") {
+        log.error("RLS context setup failed — rejecting request:", (err as Error).message);
+        res.status(503).json({ error: "Database security context unavailable" });
+        return;
+      }
+      log.warn("RLS context setup failed — continuing without RLS (non-production)");
       next();
     }
   };

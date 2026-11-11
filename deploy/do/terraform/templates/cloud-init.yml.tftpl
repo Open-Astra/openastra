@@ -31,7 +31,7 @@ write_files:
       PG_DATABASE=${db_name}
       PG_SSL=true
       PG_SSLMODE=${db_sslmode}
-      TYPESENSE_HOST=localhost
+      TYPESENSE_HOST=typesense
       TYPESENSE_PORT=8108
       TYPESENSE_PROTOCOL=http
       TYPESENSE_API_KEY=${typesense_api_key}
@@ -47,13 +47,17 @@ write_files:
           image: typesense/typesense:27.1
           container_name: typesense
           restart: always
-          command: --data-dir /data --api-key=${typesense_api_key} --enable-cors
+          # API key comes from the TYPESENSE_API_KEY env var (env_file), so it
+          # is not visible in the process list or `docker inspect` args.
+          command: --data-dir /data --enable-cors
+          env_file: .env
           ports:
             - "127.0.0.1:8108:8108"
           volumes:
             - /mnt/${volume_name}:/data
           healthcheck:
-            test: ["CMD", "curl", "-sf", "http://localhost:8108/health"]
+            # The Typesense image ships no curl — plain TCP check via bash.
+            test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/8108' 2>/dev/null"]
             interval: 15s
             timeout: 5s
             retries: 3
@@ -66,13 +70,15 @@ write_files:
           env_file: .env
           ports:
             - "8080:8080"
-          volumes:
-            - ./astra.yml:/app/astra.yml:ro
+          # astra.yml, prompts/ and SOUL.md are baked into the image. To
+          # override, place a file at /opt/astra/astra.yml and add:
+          #   volumes: ["./astra.yml:/app/astra.yml:ro"]
           depends_on:
             typesense:
               condition: service_healthy
           healthcheck:
-            test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+            # node:20-slim ships no curl — probe with node itself.
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
             interval: 30s
             timeout: 5s
             retries: 3
@@ -113,6 +119,9 @@ runcmd:
   - systemctl start docker
   - ufw default deny incoming
   - ufw default allow outgoing
+  # Source-address filtering is enforced by the DigitalOcean cloud firewall
+  # (firewall.tf). Docker-published ports bypass ufw, so Typesense is bound
+  # to 127.0.0.1 above and only :8080 is published.
   - ufw allow 22/tcp
   - ufw allow 8080/tcp
   - ufw --force enable

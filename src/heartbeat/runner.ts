@@ -133,6 +133,10 @@ async function fetchRss(row: HeartbeatConfigRow): Promise<FetchResult> {
 
 async function fetchGithub(row: HeartbeatConfigRow): Promise<FetchResult> {
   const repo = (row.config.repo as string) ?? row.url ?? "";
+  // `repo` is user-supplied and interpolated into the request path
+  if (!/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repo) || repo.includes("..")) {
+    return { status: "error", data: { repo, error: "Invalid repository (expected owner/name)" } };
+  }
   const apiUrl = `https://api.github.com/repos/${repo}/releases/latest`;
 
   try {

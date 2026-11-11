@@ -7,6 +7,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 
 // ── Proto Loading ────────────────────────────────────────────────────
 
@@ -102,16 +103,42 @@ export interface GrpcAgentClient {
 
 // ── Client Factory ───────────────────────────────────────────────────
 
-export function createGrpcAgentClient(address: string): GrpcAgentClient {
+/**
+ * Channel credentials: mTLS when GRPC_TLS_CERT/KEY/CA are set, otherwise
+ * plaintext (only suitable for loopback / a mesh that encrypts transport).
+ */
+function buildChannelCredentials(): grpc.ChannelCredentials {
+  const certPath = process.env.GRPC_TLS_CERT;
+  const keyPath = process.env.GRPC_TLS_KEY;
+  const caPath = process.env.GRPC_TLS_CA;
+  if (certPath && keyPath && caPath) {
+    return grpc.credentials.createSsl(
+      readFileSync(caPath),
+      readFileSync(keyPath),
+      readFileSync(certPath),
+    );
+  }
+  return grpc.credentials.createInsecure();
+}
+
+/** Metadata carrying the shared service key the server requires. */
+function authMetadata(apiKey?: string): grpc.Metadata {
+  const md = new grpc.Metadata();
+  const key = apiKey ?? process.env.GRPC_API_KEY ?? process.env.INTERNAL_API_KEY;
+  if (key) md.set("x-api-key", key);
+  return md;
+}
+
+export function createGrpcAgentClient(address: string, apiKey?: string): GrpcAgentClient {
   const client = new AgentServiceClient(
     address,
-    grpc.credentials.createInsecure(),
+    buildChannelCredentials(),
   );
 
   return {
     runAgentLoop(request: GrpcAgentRequest): Promise<GrpcAgentResponse> {
       return new Promise((resolve, reject) => {
-        client.runAgentLoop(request, (err: grpc.ServiceError | null, response: GrpcAgentResponse) => {
+        client.runAgentLoop(request, authMetadata(apiKey), (err: grpc.ServiceError | null, response: GrpcAgentResponse) => {
           if (err) return reject(err);
           resolve(response);
         });
@@ -119,7 +146,7 @@ export function createGrpcAgentClient(address: string): GrpcAgentClient {
     },
 
     runAgentLoopStream(request: GrpcAgentRequest): AsyncIterable<GrpcStreamEvent> {
-      const stream = client.runAgentLoopStream(request);
+      const stream = client.runAgentLoopStream(request, authMetadata(apiKey));
 
       return {
         [Symbol.asyncIterator]() {
@@ -144,7 +171,7 @@ export function createGrpcAgentClient(address: string): GrpcAgentClient {
 
     spawnAgent(request: GrpcSpawnRequest): Promise<GrpcSpawnResponse> {
       return new Promise((resolve, reject) => {
-        client.spawnAgent(request, (err: grpc.ServiceError | null, response: GrpcSpawnResponse) => {
+        client.spawnAgent(request, authMetadata(apiKey), (err: grpc.ServiceError | null, response: GrpcSpawnResponse) => {
           if (err) return reject(err);
           resolve(response);
         });

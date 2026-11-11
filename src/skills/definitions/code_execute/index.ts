@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createContext, Script } from "node:vm";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
+import { isStandaloneMode } from "../../../tools/exec-sandbox.js";
 
 // ── Code Execute Skill ────────────────────────────────────────────
 // Executes JavaScript code in a node:vm sandbox with timeout
@@ -67,6 +68,17 @@ const codeExecuteSkill: SkillDefinition = {
       parameters: CodeExecuteParams,
 
       async execute(params) {
+        // node:vm is not a security boundary (constructor chains reach the
+        // host realm), so this in-process variant is never available in
+        // server mode — there the container-backed code_execute tool
+        // (tools/code-execute.ts, CODE_EXEC_SANDBOX=docker) must be used.
+        if (!isStandaloneMode()) {
+          return {
+            error:
+              "In-process code execution is disabled in server mode. An operator must enable the " +
+              "container sandbox (ASTRA_ENABLE_CODE_EXEC=true and CODE_EXEC_SANDBOX=docker).",
+          };
+        }
         if (params.language !== "javascript") {
           return { error: `Unsupported language: ${params.language}. Only 'javascript' is supported.` };
         }

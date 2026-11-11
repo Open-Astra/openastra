@@ -7,6 +7,13 @@ import { createLogger } from "../utils/logger.js";
 import { requestApproval } from "../agents/approval-gate.js";
 import { getToolRiskLevel, canRoleExecuteTool } from "./risk-levels.js";
 import { getWorkspaceRole } from "../gateway/middleware/rbac.js";
+import {
+  toolSetHas,
+  checkToolPolicy,
+  deriveExecutionPolicy,
+  runWithExecutionPolicy,
+} from "./policy.js";
+import { toolRequiresApproval, getToolApprovalPolicy } from "./approval-policy.js";
 
 const logger = createLogger("tool-registry");
 
@@ -88,7 +95,7 @@ export function getToolSchemas(allowedTools: Set<string>): ToolSchema[] {
   const schemas: ToolSchema[] = [];
 
   for (const [name, tool] of tools) {
-    if (!allowedTools.has(name)) continue;
+    if (!toolSetHas(allowedTools, name)) continue;
 
     schemas.push({
       type: "function",
@@ -108,12 +115,17 @@ export function getToolSchemas(allowedTools: Set<string>): ToolSchema[] {
 
 const HIGH_RISK_TOOLS = new Set([
   "code_execute",
+  "shell_execute",
   "sql-query",
+  "database_query",
   "spawn",
+  "agent_spawn",
   "http_request",
   "url_fetch",
   "patch-apply",
   "file_write",
+  "file-write",
+  "delegate_tool_call",
 ]);
 
 // ── Tool Rate Limiting ──────────────────────────────────────────────
@@ -176,15 +188,26 @@ export async function executeTool(
 ): Promise<ToolResult> {
   const start = Date.now();
 
-  if (!allowedTools.has(call.name)) {
+  // Policy check: the requested allow set AND the effective policy of the
+  // surrounding call chain (see policy.ts). Tools that execute other tools
+  // therefore cannot reach anything their caller is not allowed to call,
+  // and a deny anywhere up the chain always wins.
+  const policyError =
+    checkToolPolicy(call.name, allowedTools) ??
+    (toolSetHas(new Set(ctx.deniedTools ?? []), call.name) ? `Tool denied by policy: ${call.name}` : null);
+  if (policyError) {
     return {
       toolCallId: call.id,
       name: call.name,
-      content: JSON.stringify({ error: `Tool not allowed: ${call.name}` }),
+      content: JSON.stringify({ error: policyError }),
       durationMs: Date.now() - start,
-      error: `Tool not allowed: ${call.name}`,
+      error: policyError,
     };
   }
+  const execPolicy = deriveExecutionPolicy(allowedTools, {
+    deny: ctx.deniedTools,
+    workspaceId: ctx.workspaceId,
+  });
 
   const tool = tools.get(call.name);
   if (!tool) {
@@ -197,27 +220,32 @@ export async function executeTool(
     };
   }
 
-  // Role-based tool access control (if workspace context available)
+  // Role-based tool access control (if workspace context available).
+  // Fails closed: no membership row or a failed lookup blocks the call.
   if (ctx.workspaceId) {
+    let rbacError: string | null = null;
     try {
       const role = await getWorkspaceRole(ctx.uid, ctx.workspaceId);
-      if (role) {
-        const toolRisk = getToolRiskLevel(call.name);
-        if (!canRoleExecuteTool(role, toolRisk)) {
-          const msg = `Role "${role}" cannot execute "${toolRisk}" tool "${call.name}"`;
-          logger.warn(`RBAC blocked: uid=${ctx.uid} role=${role} tool=${call.name} risk=${toolRisk}`);
-          return {
-            toolCallId: call.id,
-            name: call.name,
-            content: JSON.stringify({ error: msg }),
-            durationMs: Date.now() - start,
-            error: msg,
-          };
-        }
+      const toolRisk = getToolRiskLevel(call.name);
+      if (!role) {
+        rbacError = `No role in workspace for tool "${call.name}"`;
+        logger.warn(`RBAC blocked: uid=${ctx.uid} has no role in workspace=${ctx.workspaceId} tool=${call.name}`);
+      } else if (!canRoleExecuteTool(role, toolRisk)) {
+        rbacError = `Role "${role}" cannot execute "${toolRisk}" tool "${call.name}"`;
+        logger.warn(`RBAC blocked: uid=${ctx.uid} role=${role} tool=${call.name} risk=${toolRisk}`);
       }
     } catch (err) {
       logger.error("RBAC role check failed:", (err as Error).message);
-      // Fail-open: if role lookup fails, proceed (avoid breaking tool execution)
+      rbacError = `Access control check failed for tool "${call.name}"`;
+    }
+    if (rbacError) {
+      return {
+        toolCallId: call.id,
+        name: call.name,
+        content: JSON.stringify({ error: rbacError }),
+        durationMs: Date.now() - start,
+        error: rbacError,
+      };
     }
   }
 
@@ -238,9 +266,14 @@ export async function executeTool(
     logger.info(`[HIGH-RISK] uid=${ctx.uid} tool=${call.name} args=${call.arguments.slice(0, 200)}`);
   }
 
-  // Check cache before executing
-  if (shouldCache(call.name)) {
-    const cached = getCachedResult(call.name, call.arguments);
+  // Tools that need human approval are never served from cache and never
+  // run in the background without passing the gate first.
+  const needsApproval = await toolRequiresApproval(call.name, tool.requiresApproval);
+  const cacheScope = { uid: ctx.uid, workspaceId: ctx.workspaceId, agentId: ctx.agentId };
+
+  // Check cache before executing (scoped to the calling user/workspace/agent)
+  if (!needsApproval && shouldCache(call.name)) {
+    const cached = getCachedResult(call.name, call.arguments, cacheScope);
     if (cached) {
       return {
         toolCallId: call.id,
@@ -256,7 +289,30 @@ export async function executeTool(
     const pool = (await import("../config/postgres.js")).getPool();
     const { randomUUID } = await import("node:crypto");
     const taskId = randomUUID();
-    const params = JSON.parse(call.arguments);
+    let params: unknown;
+    try {
+      params = JSON.parse(call.arguments);
+    } catch {
+      const msg = `Tool "${call.name}": invalid JSON in arguments.`;
+      return { toolCallId: call.id, name: call.name, content: JSON.stringify({ error: msg }), durationMs: Date.now() - start, error: msg };
+    }
+    if (needsApproval) {
+      const approved = await requestApproval(
+        tool.name,
+        (params ?? {}) as Record<string, unknown>,
+        ctx,
+        { timeoutMs: (await getToolApprovalPolicy()).timeoutMs },
+      );
+      if (!approved) {
+        return {
+          toolCallId: call.id,
+          name: tool.name,
+          content: JSON.stringify({ error: "Tool execution rejected by human reviewer" }),
+          durationMs: Date.now() - start,
+          error: "rejected",
+        };
+      }
+    }
 
     // Insert task record
     await pool.query(
@@ -269,7 +325,7 @@ export async function executeTool(
     (async () => {
       try {
         const parsed = tool.parameters.parse(params);
-        const result = await tool.execute(parsed, ctx);
+        const result = await runWithExecutionPolicy(execPolicy, () => tool.execute(parsed, ctx));
         await pool.query(
           `UPDATE tool_tasks SET status = 'done', result = $1, updated_at = NOW() WHERE id = $2`,
           [JSON.stringify(result), taskId],
@@ -326,8 +382,13 @@ export async function executeTool(
     }
 
     // Feature 15: Approval gate — block execution until a human approves
-    if (tool.requiresApproval) {
-      const approved = await requestApproval(tool.name, parsed as Record<string, unknown>, ctx);
+    if (needsApproval) {
+      const approved = await requestApproval(
+        tool.name,
+        parsed as Record<string, unknown>,
+        ctx,
+        { timeoutMs: (await getToolApprovalPolicy()).timeoutMs },
+      );
       if (!approved) {
         return {
           toolCallId: call.id,
@@ -353,7 +414,7 @@ export async function executeTool(
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        result = await tool.execute(parsed, ctx);
+        result = await runWithExecutionPolicy(execPolicy, () => tool.execute(parsed, ctx));
         break; // success
       } catch (err) {
         lastErr = err instanceof Error ? err : new Error(String(err));
@@ -421,8 +482,8 @@ export async function executeTool(
     }
 
     // Cache successful results
-    if (shouldCache(call.name)) {
-      setCachedResult(call.name, call.arguments, content);
+    if (!needsApproval && shouldCache(call.name)) {
+      setCachedResult(call.name, call.arguments, content, cacheScope);
     }
 
     return {
@@ -448,7 +509,10 @@ export async function executeTool(
             success: false,
             duration_ms: Date.now() - start,
             rating: 1, // failure defaults to 1 star
-            user_comment: message,
+            // Error text can contain attacker-controlled content (web pages,
+            // tool output). It feeds skill prompt evolution, so only a short,
+            // single-line, sanitised excerpt is recorded.
+            user_comment: `tool_error: ${message.replace(/[^\x20-\x7E]+/g, " ").replace(/[<>`{}]/g, "").slice(0, 160)}`,
           },
           { uid: ctx.uid, workspaceId: ctx.workspaceId },
         ).catch(() => {
@@ -511,12 +575,20 @@ export async function executeBatchIfPossible(
   if (!calls.every((c) => c.name === firstName)) return null;
 
   const tool = tools.get(firstName);
-  if (!tool?.batchable || !tool.executeBatch || !allowedTools.has(firstName)) return null;
+  // Batch execution skips the per-call RBAC / approval / rate-limit path, so
+  // it is only used when policy allows the tool and no approval is required;
+  // anything else falls back to executeTool().
+  if (!tool?.batchable || !tool.executeBatch) return null;
+  if (checkToolPolicy(firstName, allowedTools)) return null;
+  if (toolSetHas(new Set(ctx.deniedTools ?? []), firstName)) return null;
+  if (ctx.workspaceId) return null;
+  if (await toolRequiresApproval(firstName, tool.requiresApproval)) return null;
 
   const start = Date.now();
   try {
     const allParams = calls.map((c) => tool.parameters.parse(JSON.parse(c.arguments)));
-    const results = await tool.executeBatch(allParams, ctx);
+    const batchPolicy = deriveExecutionPolicy(allowedTools, { deny: ctx.deniedTools, workspaceId: ctx.workspaceId });
+    const results = await runWithExecutionPolicy(batchPolicy, () => tool.executeBatch!(allParams, ctx));
     const resultMap = new Map<string, ToolResult>();
     calls.forEach((call, i) => {
       resultMap.set(call.id, {

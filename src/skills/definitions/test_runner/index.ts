@@ -4,6 +4,8 @@ import type { PluginContext } from "../../../plugins/types.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join, extname, basename, dirname } from "node:path";
+import { tryGuardPath } from "../../../tools/path-guard.js";
+import { isStandaloneMode, minimalChildEnv } from "../../../tools/exec-sandbox.js";
 
 // ── Test Runner Skill ──────────────────────────────────────────────
 // Auto-detect test frameworks, run tests, and generate test templates.
@@ -273,8 +275,24 @@ const testRunnerSkill: SkillDefinition = {
         "Auto-detect the test framework and run tests. Supports npm (Jest/Vitest/Mocha), pytest, go test, and cargo test.",
       parameters: RunTestsParams,
 
-      async execute(params) {
-        const repoPath = params.repoPath ?? process.cwd();
+      async execute(params, toolCtx) {
+        // Running a project's test command executes whatever its
+        // package.json / conftest.py / build script says — i.e. arbitrary
+        // code on the host. That is only acceptable in the standalone CLI,
+        // where the operator is the sole user.
+        if (!isStandaloneMode()) {
+          return {
+            error: "run_tests executes project code on the host and is only available in the standalone CLI.",
+          };
+        }
+        const guardedRepo = tryGuardPath(params.repoPath ?? ".", { access: "exec", agentId: toolCtx?.agentId });
+        if (!guardedRepo.ok) {
+          return { error: guardedRepo.error };
+        }
+        const repoPath = guardedRepo.path;
+        if (params.filter && /^-/.test(params.filter.trim())) {
+          return { error: "filter must not start with '-'" };
+        }
         const framework: DetectedFramework = (params.framework as DetectedFramework) ?? detectFramework(repoPath);
 
         if (framework === "unknown") {
@@ -296,6 +314,8 @@ const testRunnerSkill: SkillDefinition = {
             cwd: repoPath,
             encoding: "utf-8",
             timeout: 120_000,
+            // Tests never see the gateway's secrets.
+            env: minimalChildEnv(),
             stdio: ["pipe", "pipe", "pipe"],
           });
         } catch (err) {
@@ -327,9 +347,17 @@ const testRunnerSkill: SkillDefinition = {
         "Generate a test file template for a source file. Reads the file, extracts exported functions, and produces a skeleton test. Does NOT write the file — returns the template for review.",
       parameters: GenerateTestParams,
 
-      async execute(params) {
-        const repoPath = params.repoPath ?? process.cwd();
-        const fullPath = join(repoPath, params.filePath);
+      async execute(params, toolCtx) {
+        const guardedRepo = tryGuardPath(params.repoPath ?? ".", { access: "list", agentId: toolCtx?.agentId });
+        if (!guardedRepo.ok) {
+          return { error: guardedRepo.error };
+        }
+        const repoPath = guardedRepo.path;
+        const guardedFile = tryGuardPath(join(repoPath, params.filePath), { access: "read", agentId: toolCtx?.agentId });
+        if (!guardedFile.ok) {
+          return { error: guardedFile.error };
+        }
+        const fullPath = guardedFile.path;
         const ext = extname(fullPath).toLowerCase();
 
         let content: string;

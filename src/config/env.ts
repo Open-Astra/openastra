@@ -8,25 +8,108 @@ import { z } from "zod";
 // Reject these in production — they ship in deploy specs and must be
 // replaced before going live.
 
+// Compared case-insensitively (all entries lowercase).
 const PLACEHOLDER_SECRETS = new Set([
-  "CHANGE_ME_AFTER_DEPLOY",
+  "change_me_after_deploy",
   "changeme",
   "change_me",
+  "change-me",
   "your-secret-here",
   "replace-me",
-  "TODO",
-  "FIXME",
+  "replace_me",
+  "todo",
+  "fixme",
   "secret",
   "password",
+  "postgres",
+  "admin",
+  "test",
+  "example",
+  "xxx",
+  "astra",
+  "astra-typesense-key",
+  "no-key",
 ]);
 
-function rejectPlaceholder(val: string | undefined, field: string): void {
-  if (val && PLACEHOLDER_SECRETS.has(val.trim().toLowerCase())) {
-    throw new Error(
-      `[SECURITY] ${field} contains a placeholder value ("${val}"). ` +
-      `Set a real secret before running in production.`,
-    );
+// Template-style values: PLACEHOLDER_PG, <your-key>, your_api_key, CHANGE_ME_…
+const PLACEHOLDER_PATTERNS: RegExp[] = [
+  /^placeholder/i,
+  /placeholder$/i,
+  /^change[-_ ]?me/i,
+  /^your[-_ ]/i,
+  /^<.*>$/,
+  /^\$\{.*\}$/,
+  /^x{3,}$/i,
+];
+
+export function isPlaceholderSecret(val: string | undefined): boolean {
+  if (!val) return false;
+  const v = val.trim();
+  if (PLACEHOLDER_SECRETS.has(v.toLowerCase())) return true;
+  return PLACEHOLDER_PATTERNS.some((p) => p.test(v));
+}
+
+/** Minimum lengths for shared secrets (characters). */
+export const MIN_SECRET_LENGTH = {
+  JWT_SECRET: 32,
+  INTERNAL_API_KEY: 24,
+  TYPESENSE_API_KEY: 16,
+} as const;
+
+/**
+ * Collect every secret-hygiene problem in the given values.
+ * Returned as messages so the caller decides whether they are fatal.
+ */
+export function findSecretProblems(values: {
+  JWT_SECRET?: string;
+  INTERNAL_API_KEY?: string;
+  TYPESENSE_API_KEY?: string;
+  PG_PASSWORD?: string;
+}): string[] {
+  const problems: string[] = [];
+  for (const [field, val] of Object.entries(values)) {
+    if (isPlaceholderSecret(val)) {
+      problems.push(`${field} contains a placeholder value — set a real secret`);
+    }
   }
+  for (const [field, min] of Object.entries(MIN_SECRET_LENGTH)) {
+    const val = values[field as keyof typeof MIN_SECRET_LENGTH];
+    if (val !== undefined && val.length < min) {
+      problems.push(`${field} is only ${val.length} characters — use at least ${min}`);
+    }
+  }
+  if (values.PG_PASSWORD !== undefined && values.PG_PASSWORD.length === 0) {
+    problems.push("PG_PASSWORD is empty");
+  }
+  if (
+    values.JWT_SECRET && values.INTERNAL_API_KEY &&
+    values.JWT_SECRET === values.INTERNAL_API_KEY
+  ) {
+    problems.push("JWT_SECRET and INTERNAL_API_KEY must be different values");
+  }
+  return problems;
+}
+
+/**
+ * Whether security validation failures are fatal.
+ *
+ * Decided on an explicit signal, never by accident:
+ *   ASTRA_ENFORCE_SECURITY=true|false  — explicit override, always wins
+ *   NODE_ENV=production                — enforced
+ *   NODE_ENV=development|test          — explicit opt-out (problems are logged)
+ *   NODE_ENV unset                     — NOT treated as a silent opt-out:
+ *                                        problems are logged loudly and the
+ *                                        operator is told how to enforce.
+ */
+export function securityEnforcement(
+  env: NodeJS.ProcessEnv = process.env,
+): "enforce" | "warn" | "warn-unset" {
+  const flag = env.ASTRA_ENFORCE_SECURITY?.toLowerCase();
+  if (flag === "true" || flag === "1") return "enforce";
+  if (flag === "false" || flag === "0") return "warn";
+  if (env.NODE_ENV === "production") return "enforce";
+  if (!env.NODE_ENV) return "warn-unset";
+  return "warn";
 }
 
 // ── Zod Helpers ────────────────────────────────────────────────────
@@ -566,21 +649,30 @@ export function loadEnv(): EnvConfig {
     );
   }
 
-  // In production, reject placeholder secrets and validate security config
-  if (e.NODE_ENV === "production") {
-    rejectPlaceholder(e.JWT_SECRET, "JWT_SECRET");
-    rejectPlaceholder(e.INTERNAL_API_KEY, "INTERNAL_API_KEY");
-    rejectPlaceholder(e.TYPESENSE_API_KEY, "TYPESENSE_API_KEY");
-    rejectPlaceholder(e.PG_PASSWORD, "PG_PASSWORD");
-
-    // JWT_SECRET should be at least 32 chars for HS256
-    if (e.JWT_SECRET.length < 32) {
-      throw new Error(
-        `[SECURITY] JWT_SECRET is only ${e.JWT_SECRET.length} characters. ` +
-        `Use at least 32 characters for HS256 signing.`,
+  // Secret hygiene is checked in EVERY mode; whether a problem is fatal
+  // depends on securityEnforcement() (see above).
+  const enforcement = securityEnforcement();
+  const secretProblems = findSecretProblems({
+    JWT_SECRET: e.JWT_SECRET,
+    INTERNAL_API_KEY: e.INTERNAL_API_KEY,
+    TYPESENSE_API_KEY: e.TYPESENSE_API_KEY,
+    PG_PASSWORD: e.PG_PASSWORD,
+  });
+  if (secretProblems.length > 0) {
+    const list = secretProblems.map((p) => `  - ${p}`).join("\n");
+    if (enforcement === "enforce") {
+      throw new Error(`[SECURITY] Refusing to start with weak secrets:\n${list}`);
+    }
+    if (e.NODE_ENV !== "test") {
+      console.warn(
+        `[SECURITY] Weak secrets detected (not enforced${enforcement === "warn-unset" ? " — NODE_ENV is not set" : ""}):\n${list}\n` +
+        `  Set NODE_ENV=production or ASTRA_ENFORCE_SECURITY=true to make these fatal. ` +
+        `Never expose this instance to a network in this state.`,
       );
     }
+  }
 
+  if (enforcement === "enforce") {
     // CORS wildcard is dangerous in production
     if (e.ALLOWED_ORIGINS === "*") {
       throw new Error(
@@ -607,6 +699,9 @@ export function loadEnv(): EnvConfig {
     }
     if (e.PII_DETECTION_POLICY === "allow") {
       warnings.push("PII_DETECTION_POLICY is 'allow' — PII may be stored in memory");
+    }
+    if (!process.env.WORKSPACE_SECRETS_KEY) {
+      warnings.push("WORKSPACE_SECRETS_KEY is not set — storing per-workspace secrets will be refused");
     }
     if (!e.COLD_STORE_ENCRYPTION_KEY) {
       warnings.push("COLD_STORE_ENCRYPTION_KEY is not set — cold store snapshots will be unencrypted");

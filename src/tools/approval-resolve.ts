@@ -19,7 +19,7 @@ const ApprovalResolveParams = z.object({
 registerTool({
   name: "approval_resolve",
   description:
-    "Manage human-in-the-loop approval requests. List pending approvals or approve/deny a specific request.",
+    "Inspect human-in-the-loop approval requests. List the user's pending approvals or deny one. Approving requires a human via the approvals API.",
   parameters: ApprovalResolveParams,
 
   async execute(params, ctx) {
@@ -44,8 +44,32 @@ registerTool({
       return { error: "requestId is required for approve/deny actions" };
     }
 
-    const resolution = params.action === "approve" ? "approved" : "denied";
-    resolveApproval(params.requestId, resolution, ctx.uid);
-    return { result: `Request ${params.requestId} ${resolution}.` };
+    // Approving is a human decision. A model calling this tool would be
+    // approving its own (or another session's) request, so approval through
+    // the tool surface is refused outright; it must come from an
+    // authenticated person via the approvals API or a channel reply.
+    if (params.action === "approve") {
+      return {
+        error:
+          "Approvals cannot be granted by an agent. Ask the user to approve the request " +
+          "through the approvals API or their channel.",
+      };
+    }
+
+    // Denying only ever reduces what runs, and is scoped to the caller's own
+    // pending requests in the caller's workspace.
+    const denied = await resolveApproval(
+      params.requestId,
+      "denied",
+      `agent:${ctx.agentId}`,
+      "Denied via approval_resolve tool",
+      { uid: ctx.uid, workspaceId: ctx.workspaceId },
+    );
+    void denied;
+    const pending = await getPendingApprovals(ctx.uid);
+    const stillPending = pending.some((a) => a.id === params.requestId);
+    return stillPending
+      ? { error: `Request ${params.requestId} not found for this user/workspace.` }
+      : { result: `Request ${params.requestId} denied.` };
   },
 });

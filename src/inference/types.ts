@@ -45,6 +45,13 @@ export interface InferenceRequest {
   // Feature 10: Extended thinking
   useExtendedThinking?: boolean;
   budgetThinkingTokens?: number;
+  /**
+   * Tenant scope for the inference-level semantic cache. When absent the
+   * cache layer is bypassed — responses are never shared across users.
+   */
+  cacheScope?: { agentId: string; uid: string; workspaceId?: string | null };
+  /** Abort signal set by the resilient layer on timeout; providers may honour it. */
+  signal?: AbortSignal;
 }
 
 export interface InferenceResponse {

@@ -4,6 +4,7 @@ import { Search, Command, Bell, Zap, LogOut, User, Settings, Sun, Moon, X, Alert
 import { useAppStore } from "@/stores/app";
 import { useAuthStore } from "@/stores/auth";
 import { cn } from "@/lib/utils";
+import { DEMO_MODE } from "@/lib/demo";
 
 interface Notification {
   id: string;
@@ -42,7 +43,8 @@ export function Topbar() {
   const logout = useAuthStore((s) => s.logout);
 
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notifications, setNotifications] = useState(mockNotifications);
+  // Sample notifications in demo mode only — there is no notifications API yet.
+  const [notifications, setNotifications] = useState(DEMO_MODE ? mockNotifications : []);
   const menuRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
   const unreadCount = notifications.filter((n) => !n.read).length;

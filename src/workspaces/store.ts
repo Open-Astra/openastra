@@ -130,7 +130,8 @@ export async function addMember(
   await pool.query(
     `INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
      VALUES ($1, $2, $3, $4)
-     ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = $3`,
+     ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = $3
+       WHERE workspace_members.role <> 'owner'`,
     [workspaceId, uid, role, invitedBy],
   );
 }
@@ -143,7 +144,9 @@ export async function removeMember(
 ): Promise<void> {
   const pool = getPool();
   await pool.query(
-    "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+    // The owner row can never be removed through this path — ownership must
+    // be transferred explicitly first.
+    "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role <> 'owner'",
     [workspaceId, uid],
   );
 }

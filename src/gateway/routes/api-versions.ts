@@ -1,10 +1,15 @@
 import { Router } from "express";
 import { z } from "zod";
 import { getPool } from "../../config/postgres.js";
+import { platformAdmin } from "../middleware/platform-admin.js";
 
 const CreateBody = z.object({
-  version: z.string(),
-  changelog: z.string().optional(),
+  version: z.string().min(1).max(32).regex(/^[A-Za-z0-9._-]+$/),
+  changelog: z.string().max(10_000).optional(),
+});
+
+const DeprecateBody = z.object({
+  sunsetAt: z.coerce.date().optional(),
 });
 
 export function createApiVersionsRouter(): Router {
@@ -32,7 +37,8 @@ export function createApiVersionsRouter(): Router {
     res.json(rows[0]);
   });
 
-  router.post("/api-versions", async (req, res) => {
+  // API version lifecycle is platform-global — operator only
+  router.post("/api-versions", platformAdmin(), async (req, res) => {
     const parsed = CreateBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
     const pool = getPool();
@@ -43,8 +49,10 @@ export function createApiVersionsRouter(): Router {
     res.status(201).json({ version: parsed.data.version });
   });
 
-  router.put("/api-versions/:version/deprecate", async (req, res) => {
-    const sunsetAt = req.body.sunsetAt ? new Date(req.body.sunsetAt) : null;
+  router.put("/api-versions/:version/deprecate", platformAdmin(), async (req, res) => {
+    const body = DeprecateBody.safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: body.error.message });
+    const sunsetAt = body.data.sunsetAt ?? null;
     const pool = getPool();
     const { rowCount } = await pool.query(
       `UPDATE api_versions SET status = 'deprecated', deprecated_at = now(), sunset_at = $2

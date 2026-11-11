@@ -12,7 +12,7 @@ export type Role = "owner" | "editor" | "tool_runner" | "viewer";
 
 const ROLE_RISK_LEVELS: Record<Role, Set<ToolRiskLevel>> = {
   owner: new Set(["READ_ONLY", "SAFE", "HIGH_RISK", "ADMIN_ONLY"]),
-  editor: new Set(["SAFE", "HIGH_RISK"]),
+  editor: new Set(["READ_ONLY", "SAFE", "HIGH_RISK"]),
   tool_runner: new Set(["SAFE", "READ_ONLY"]),
   viewer: new Set(["READ_ONLY"]),
 };
@@ -30,13 +30,15 @@ export const TOOL_RISK_CATALOG: Record<string, ToolRiskLevel> = {
   "rag-search": "READ_ONLY",
   "memory-export": "READ_ONLY",
   "url-fetch": "READ_ONLY",
-  "file-read": "READ_ONLY",
+  "file-read": "HIGH_RISK",
+  "file-fetch": "HIGH_RISK",
+  "file-list": "HIGH_RISK",
   "pdf-read": "READ_ONLY",
   "graph-query": "READ_ONLY",
-  "database-query": "READ_ONLY",
+  "database-query": "HIGH_RISK",
   "graphql-query": "READ_ONLY",
-  "sql-query": "READ_ONLY", // actually HIGH_RISK but treating as read-only if SELECT-only enforced
-  "http-request": "READ_ONLY",
+  "sql-query": "HIGH_RISK",
+  "http-request": "SAFE",
   "codebase-search": "READ_ONLY",
   "codebase-index": "READ_ONLY",
   "research-manage": "READ_ONLY",
@@ -54,7 +56,7 @@ export const TOOL_RISK_CATALOG: Record<string, ToolRiskLevel> = {
   "clipboard": "SAFE",
   "multi-modal-input": "SAFE",
   "model-inference": "SAFE",
-  "approval-resolve": "SAFE",
+  "approval-resolve": "ADMIN_ONLY",
 
   // High-risk tools (editor and owner only)
   "code-execute": "HIGH_RISK",
@@ -69,11 +71,25 @@ export const TOOL_RISK_CATALOG: Record<string, ToolRiskLevel> = {
   "run-procedure": "HIGH_RISK",
   "workspace-memory": "HIGH_RISK",
   "workspace-knowledge": "HIGH_RISK",
+  "delegate-tool-call": "HIGH_RISK",
+  "run-parallel-steps": "HIGH_RISK",
+  "run-tests": "HIGH_RISK",
+  "git-ops": "HIGH_RISK",
+  "browser": "HIGH_RISK",
+  "memory-import": "HIGH_RISK",
 
   // Admin-only tools (owner only)
   "hot-reload": "ADMIN_ONLY",
 };
 
+// Tools are registered with a mix of hyphens and underscores, so the catalog
+// is looked up by a normalised name ("file_read" === "file-read").
+const normalizeRiskKey = (name: string): string => name.trim().toLowerCase().replace(/-/g, "_");
+
+const NORMALIZED_RISK_CATALOG = new Map<string, ToolRiskLevel>(
+  Object.entries(TOOL_RISK_CATALOG).map(([name, level]) => [normalizeRiskKey(name), level]),
+);
+
 export function getToolRiskLevel(toolName: string): ToolRiskLevel {
-  return TOOL_RISK_CATALOG[toolName] ?? "HIGH_RISK"; // default to HIGH_RISK if unknown
+  return NORMALIZED_RISK_CATALOG.get(normalizeRiskKey(toolName)) ?? "HIGH_RISK"; // default to HIGH_RISK if unknown
 }

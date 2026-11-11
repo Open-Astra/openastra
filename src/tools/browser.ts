@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
+import { isBlockedUrl } from "../utils/ssrf-guard.js";
 import { createLogger } from "../utils/logger.js";
 
 const logger = createLogger("tool:browser");
@@ -19,59 +20,113 @@ const logger = createLogger("tool:browser");
 // optional dependency. We use `unknown` and cast dynamically.
 
 let _browser: unknown = null;
-let _page: unknown = null;
+
+// One isolated browser context (cookies, storage, history) per user. A
+// shared page would let one tenant read another tenant's logged-in pages.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _contexts = new Map<string, { context: any; page: any; lastUsed: number }>();
+const MAX_CONTEXTS = 20;
+
+// Request interception: EVERY request the page makes — navigations, redirects,
+// sub-resources, fetch()/XHR issued by `evaluate`, link clicks, history
+// navigation — is checked against the SSRF guard. Fails closed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function guardRoute(route: any): Promise<void> {
+  try {
+    const url: string = route.request().url();
+    const scheme = url.slice(0, url.indexOf(":")).toLowerCase();
+    if (scheme === "data" || scheme === "blob" || scheme === "about") {
+      await route.continue();
+      return;
+    }
+    if (scheme !== "http" && scheme !== "https") {
+      await route.abort("blockedbyclient"); // file:, ftp:, chrome:, view-source:, ...
+      return;
+    }
+    if (await isBlockedUrl(url)) {
+      logger.warn(`Blocked browser request to internal address: ${url.slice(0, 200)}`);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  } catch {
+    try { await route.abort("blockedbyclient"); } catch { /* already handled */ }
+  }
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getPage(): Promise<{ page: any; browser: any }> {
-  if (_page && _browser) {
+async function getPage(scopeKey: string): Promise<{ page: any; browser: any }> {
+  if (_browser) {
     // Check if browser is still connected
     const browser = _browser as { isConnected(): boolean };
-    if (browser.isConnected()) {
-      return { page: _page, browser: _browser };
+    if (!browser.isConnected()) {
+      _contexts.clear();
+      _browser = null;
     }
-    _page = null;
-    _browser = null;
+  }
+
+  if (!_browser) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let pw: any;
+    try {
+      // Dynamic import as string to avoid TS module resolution on optional peer dep
+      const modName = "playwright";
+      pw = await import(/* webpackIgnore: true */ modName);
+    } catch {
+      throw new Error(
+        "Playwright is not installed. Run: npm install playwright && npx playwright install chromium",
+      );
+    }
+
+    const launched = await pw.chromium.launch({
+      headless: true,
+      args: [
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        // Chromium's own sandbox stays ON unless the operator explicitly
+        // opts out (some container runtimes cannot provide it).
+        ...(process.env.BROWSER_NO_SANDBOX === "true" ? ["--no-sandbox", "--disable-setuid-sandbox"] : []),
+      ],
+    });
+    _browser = launched;
+
+    // Cleanup on process exit
+    const cleanup = () => {
+      try { launched.close().catch(() => {}); } catch { /* ignore */ }
+      _browser = null;
+      _contexts.clear();
+    };
+    process.once("beforeExit", cleanup);
+    process.once("SIGTERM", cleanup);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let pw: any;
-  try {
-    // Dynamic import as string to avoid TS module resolution on optional peer dep
-    const modName = "playwright";
-    pw = await import(/* webpackIgnore: true */ modName);
-  } catch {
-    throw new Error(
-      "Playwright is not installed. Run: npm install playwright && npx playwright install chromium",
-    );
+  const browser = _browser as any;
+  const existing = _contexts.get(scopeKey);
+  if (existing) {
+    existing.lastUsed = Date.now();
+    return { page: existing.page, browser };
   }
 
-  const browser = await pw.chromium.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-  });
+  // Evict the least recently used context when at capacity.
+  if (_contexts.size >= MAX_CONTEXTS) {
+    const oldest = [..._contexts.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+    if (oldest) {
+      _contexts.delete(oldest[0]);
+      try { await oldest[1].context.close(); } catch { /* ignore */ }
+    }
+  }
 
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     userAgent: "Astra-Browser/1.0 (Playwright; Headless Chromium)",
+    serviceWorkers: "block", // service workers bypass request routing
+    acceptDownloads: false,
   });
+  await context.route("**/*", guardRoute);
 
   const page = await context.newPage();
-  _browser = browser;
-  _page = page;
-
-  // Cleanup on process exit
-  const cleanup = () => {
-    try { browser.close().catch(() => {}); } catch { /* ignore */ }
-    _browser = null;
-    _page = null;
-  };
-  process.once("beforeExit", cleanup);
-  process.once("SIGTERM", cleanup);
+  _contexts.set(scopeKey, { context, page, lastUsed: Date.now() });
 
   return { page, browser };
 }
@@ -146,14 +201,34 @@ const BrowserParams = z.discriminatedUnion("action", [
 // ── SSRF Guard for Navigation ──────────────────────────────────────
 
 async function checkNavigationUrl(url: string): Promise<void> {
+  // Fails closed: any error from the guard blocks the navigation.
+  let blocked = true;
   try {
-    const { isBlockedUrl } = await import("../utils/ssrf-guard.js");
-    if (await isBlockedUrl(url)) {
-      throw new Error(`Navigation to ${url} blocked by SSRF guard`);
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("SSRF")) throw err;
-    // ssrf-guard not available — allow navigation
+    blocked = await isBlockedUrl(url);
+  } catch {
+    blocked = true;
+  }
+  if (blocked) {
+    throw new Error(`Navigation to ${url} blocked by SSRF guard`);
+  }
+}
+
+// After any action that can change the page's location (click, evaluate,
+// history navigation) the resulting URL is re-validated; if the page ended
+// up on an internal address it is reset to about:blank.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function ensureSafeLocation(page: any): Promise<void> {
+  const current: string = page.url();
+  if (!/^https?:/i.test(current)) return;
+  let blocked = true;
+  try {
+    blocked = await isBlockedUrl(current);
+  } catch {
+    blocked = true;
+  }
+  if (blocked) {
+    try { await page.goto("about:blank"); } catch { /* ignore */ }
+    throw new Error(`Page navigated to a blocked address (${current.slice(0, 120)}); reset by SSRF guard`);
   }
 }
 
@@ -168,13 +243,15 @@ registerTool({
     "Use snapshot to read page content, screenshot to see visual state.",
   parameters: BrowserParams,
 
-  async execute(params) {
+  async execute(params, ctx) {
     const startMs = Date.now();
+    // Browser state is scoped to the calling user (and workspace).
+    const scopeKey = `${ctx?.workspaceId ?? ""}:${ctx?.uid ?? "anonymous"}`;
 
     switch (params.action) {
       case "navigate": {
         await checkNavigationUrl(params.url);
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         const response = await page.goto(params.url, {
           waitUntil: params.waitUntil,
           timeout: 30000,
@@ -191,9 +268,10 @@ registerTool({
       }
 
       case "click": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         await page.click(params.selector, { timeout: 10000 });
         await page.waitForTimeout(500);
+        await ensureSafeLocation(page);
         return {
           action: "click",
           selector: params.selector,
@@ -203,7 +281,7 @@ registerTool({
       }
 
       case "type": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         await page.fill(params.selector, params.text);
         if (params.pressEnter) {
           await page.press(params.selector, "Enter");
@@ -219,7 +297,7 @@ registerTool({
       }
 
       case "screenshot": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         let buffer: Buffer;
         if (params.selector) {
           const element = await page.$(params.selector);
@@ -244,7 +322,7 @@ registerTool({
       }
 
       case "snapshot": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         const element = await page.$(params.selector);
         if (!element) {
           return { action: "snapshot", error: `Element not found: ${params.selector}` };
@@ -276,8 +354,9 @@ registerTool({
       }
 
       case "evaluate": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         const result = await page.evaluate(params.script);
+        await ensureSafeLocation(page);
         const serialized = JSON.stringify(result, null, 2) ?? "undefined";
         return {
           action: "evaluate",
@@ -287,7 +366,7 @@ registerTool({
       }
 
       case "select": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         const selected = await page.selectOption(params.selector, params.value);
         return {
           action: "select",
@@ -298,7 +377,7 @@ registerTool({
       }
 
       case "wait": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         await page.waitForSelector(params.selector, {
           state: params.state,
           timeout: params.timeoutMs,
@@ -313,8 +392,9 @@ registerTool({
       }
 
       case "go_back": {
-        const { page } = await getPage();
+        const { page } = await getPage(scopeKey);
         await page.goBack({ waitUntil: "domcontentloaded", timeout: 15000 });
+        await ensureSafeLocation(page);
         return {
           action: "go_back",
           currentUrl: page.url(),

@@ -13,8 +13,30 @@ const MIGRATIONS_DIR = join(
   "migrations",
 );
 
+// Arbitrary but stable 64-bit key for pg_advisory_lock — serialises the
+// migration run across gateway replicas starting at the same time.
+const MIGRATION_LOCK_KEY = "7239017465120931";
+
 export async function runMigrations(): Promise<string[]> {
   const pool = getPool();
+
+  // Hold a session-level advisory lock on a dedicated connection for the whole
+  // run. A second replica blocks here, then finds everything already applied.
+  const lockClient = await pool.connect();
+  try {
+    await lockClient.query("SELECT pg_advisory_lock($1::bigint)", [MIGRATION_LOCK_KEY]);
+    return await runMigrationsLocked(pool);
+  } finally {
+    try {
+      await lockClient.query("SELECT pg_advisory_unlock($1::bigint)", [MIGRATION_LOCK_KEY]);
+    } catch {
+      // Connection lost — the session lock is released by Postgres anyway.
+    }
+    lockClient.release();
+  }
+}
+
+async function runMigrationsLocked(pool: ReturnType<typeof getPool>): Promise<string[]> {
 
   // Ensure the schema_migrations table exists (bootstrap)
   await pool.query(`
@@ -53,6 +75,9 @@ export async function runMigrations(): Promise<string[]> {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      // Migrations may build indexes; do not let the pool-wide 30s
+      // statement_timeout kill them half-way.
+      await client.query("SET LOCAL statement_timeout = 0");
       await client.query(sql);
       await client.query(
         "INSERT INTO schema_migrations (version) VALUES ($1)",
@@ -62,7 +87,7 @@ export async function runMigrations(): Promise<string[]> {
       newMigrations.push(file);
       if (!process.env.ASTRA_STANDALONE) console.log(`[migrate] Applied: ${file}`);
     } catch (err) {
-      await client.query("ROLLBACK");
+      await client.query("ROLLBACK").catch(() => {});
       console.error(`[migrate] Failed on ${file}:`, err);
       throw err;
     } finally {
@@ -80,16 +105,15 @@ export async function runMigrations(): Promise<string[]> {
 
   // Warm up HNSW indexes in production to load them into shared_buffers
   if (process.env.NODE_ENV === "production") {
-    const INDEXES_TO_WARM = [
-      "session_messages_embedding_idx",
-      "daily_memories_embedding_idx",
-      "graph_entities_embedding_idx",
-      "procedural_memory_embedding_idx",
-    ];
-
     try {
-      for (const idx of INDEXES_TO_WARM) {
-        await pool.query(`SELECT pg_prewarm($1)`, [idx]).catch(() => {});
+      // Discover the vector indexes that actually exist instead of guessing names.
+      const { rows: vectorIndexes } = await pool.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND (indexdef ILIKE '%USING hnsw%' OR indexdef ILIKE '%USING ivfflat%')`,
+      );
+      for (const { indexname } of vectorIndexes) {
+        await pool.query(`SELECT pg_prewarm($1::regclass)`, [indexname]).catch(() => {});
       }
       if (!process.env.ASTRA_STANDALONE) console.log("[migrate] Warmed HNSW indexes");
     } catch {

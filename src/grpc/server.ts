@@ -8,6 +8,7 @@ import * as protoLoader from "@grpc/proto-loader";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { readFileSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { runAgentLoop } from "../agents/loop.js";
 import { spawnAgent } from "../agents/spawn.js";
 import { getAgentConfig } from "../config/agents.js";
@@ -81,14 +82,59 @@ async function getRunAgentLoopStream(): Promise<StreamLoopFn | null> {
   return _runAgentLoopStream;
 }
 
+// ── Authentication ───────────────────────────────────────────────────
+// Every RPC except HealthCheck must carry the shared service key in the
+// `x-api-key` metadata entry (GRPC_API_KEY, falling back to
+// INTERNAL_API_KEY). The request message's `uid` is trusted only because
+// the caller has proven it is an internal service — without this check any
+// client that can reach the port could act as any user. With no key
+// configured every call is refused (fail closed).
+
+function expectedServiceKey(): string | undefined {
+  return process.env.GRPC_API_KEY || process.env.INTERNAL_API_KEY || undefined;
+}
+
+function isAuthorized(metadata: grpc.Metadata): boolean {
+  const expected = expectedServiceKey();
+  if (!expected) return false;
+  const provided = metadata.get("x-api-key")[0];
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+const UNAUTHENTICATED = {
+  code: grpc.status.UNAUTHENTICATED,
+  message: "Missing or invalid x-api-key metadata",
+};
+
+function validRequestFields(...fields: unknown[]): boolean {
+  return fields.every((f) => typeof f === "string" && f.length > 0 && f.length <= 100_000);
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────
 
 async function handleRunAgentLoop(
   call: grpc.ServerUnaryCall<ProtoAgentRequest, unknown>,
   callback: grpc.sendUnaryData<unknown>,
 ) {
+  if (!isAuthorized(call.metadata)) {
+    callback(UNAUTHENTICATED);
+    return;
+  }
+
   try {
     const req = call.request;
+    if (!validRequestFields(req.uid, req.agentId, req.message)) {
+      callback({ code: grpc.status.INVALID_ARGUMENT, message: "uid, agentId and message are required" });
+      return;
+    }
 
     const agentConfig = getAgentConfig(req.agentId as AgentId);
     const inferenceClient = getInferenceClientForAgent(agentConfig);
@@ -122,10 +168,12 @@ async function handleRunAgentLoop(
       },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Internal error text can carry provider URLs / SQL — log, don't return
+    console.error("[grpc] runAgentLoop failed:", err);
+    const notFound = err instanceof Error && err.message.startsWith("Unknown agent");
     callback({
-      code: grpc.status.INTERNAL,
-      message,
+      code: notFound ? grpc.status.NOT_FOUND : grpc.status.INTERNAL,
+      message: notFound ? "Unknown agent" : "Agent run failed",
     });
   }
 }
@@ -133,7 +181,18 @@ async function handleRunAgentLoop(
 function handleRunAgentLoopStream(
   call: grpc.ServerWritableStream<ProtoAgentRequest, unknown>,
 ) {
+  if (!isAuthorized(call.metadata)) {
+    call.destroy(Object.assign(new Error(UNAUTHENTICATED.message), { code: UNAUTHENTICATED.code }));
+    return;
+  }
+
   const req = call.request;
+  if (!validRequestFields(req.uid, req.agentId, req.message)) {
+    call.destroy(Object.assign(new Error("uid, agentId and message are required"), {
+      code: grpc.status.INVALID_ARGUMENT,
+    }));
+    return;
+  }
 
   (async () => {
     try {
@@ -214,8 +273,8 @@ function handleRunAgentLoopStream(
 
       call.end();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      call.destroy(new Error(message));
+      console.error("[grpc] runAgentLoopStream failed:", err);
+      call.destroy(Object.assign(new Error("Agent run failed"), { code: grpc.status.INTERNAL }));
     }
   })();
 }
@@ -224,8 +283,17 @@ async function handleSpawnAgent(
   call: grpc.ServerUnaryCall<ProtoSpawnRequest, unknown>,
   callback: grpc.sendUnaryData<unknown>,
 ) {
+  if (!isAuthorized(call.metadata)) {
+    callback(UNAUTHENTICATED);
+    return;
+  }
+
   try {
     const req = call.request;
+    if (!validRequestFields(req.uid, req.parentAgentId, req.targetAgentId, req.task)) {
+      callback({ code: grpc.status.INVALID_ARGUMENT, message: "uid, parentAgentId, targetAgentId and task are required" });
+      return;
+    }
 
     const parentConfig = getAgentConfig(req.parentAgentId as AgentId);
     const targetConfig = getAgentConfig(req.targetAgentId as AgentId);
@@ -250,7 +318,7 @@ async function handleSpawnAgent(
       error: "",
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    console.error("[grpc] spawnAgent failed:", err);
     callback(null, {
       taskId: "",
       targetAgentId: "",
@@ -258,7 +326,7 @@ async function handleSpawnAgent(
       success: false,
       durationMs: 0,
       sessionId: "",
-      error: message,
+      error: "Spawn failed",
     });
   }
 }
@@ -279,41 +347,55 @@ function handleHealthCheck(
  * Build server credentials based on environment variables.
  *
  * When GRPC_TLS_CERT, GRPC_TLS_KEY, and GRPC_TLS_CA are all set, mutual
- * TLS is enabled (requireClientCerts = true).  If any variable is absent
- * the server falls back to insecure plaintext and logs a warning.
+ * TLS is enabled (requireClientCerts = true).
+ *
+ * Plaintext is never a silent fallback:
+ *   • a certificate that fails to load is a startup error
+ *   • without TLS the server only starts outside production, or when the
+ *     operator sets GRPC_ALLOW_INSECURE=true (e.g. a service mesh already
+ *     provides transport security) — and then binds to loopback unless
+ *     GRPC_BIND_HOST says otherwise.
  */
-function buildServerCredentials(): grpc.ServerCredentials {
+function buildServerCredentials(): { credentials: grpc.ServerCredentials; secure: boolean } {
   const certPath = process.env.GRPC_TLS_CERT;
   const keyPath = process.env.GRPC_TLS_KEY;
   const caPath = process.env.GRPC_TLS_CA;
 
   if (certPath && keyPath && caPath) {
-    try {
-      const caCert = readFileSync(caPath);
-      const certChain = readFileSync(certPath);
-      const privateKey = readFileSync(keyPath);
+    // Let read errors propagate — refusing to start beats serving plaintext
+    const caCert = readFileSync(caPath);
+    const certChain = readFileSync(certPath);
+    const privateKey = readFileSync(keyPath);
 
-      console.log("[grpc] mTLS enabled — mutual certificate verification active");
-      return grpc.ServerCredentials.createSsl(
+    console.log("[grpc] mTLS enabled — mutual certificate verification active");
+    return {
+      credentials: grpc.ServerCredentials.createSsl(
         caCert,
         [{ private_key: privateKey, cert_chain: certChain }],
         true, // requireClientCerts — enforces mTLS
-      );
-    } catch (err) {
-      console.error("[grpc] Failed to load TLS certificates, falling back to insecure:", err);
-    }
-  } else {
-    const missing = [
-      !certPath && "GRPC_TLS_CERT",
-      !keyPath && "GRPC_TLS_KEY",
-      !caPath && "GRPC_TLS_CA",
-    ].filter(Boolean);
-    if (missing.length > 0) {
-      console.warn(`[grpc] TLS not configured (missing: ${missing.join(", ")}) — using insecure credentials`);
-    }
+      ),
+      secure: true,
+    };
   }
 
-  return grpc.ServerCredentials.createInsecure();
+  const missing = [
+    !certPath && "GRPC_TLS_CERT",
+    !keyPath && "GRPC_TLS_KEY",
+    !caPath && "GRPC_TLS_CA",
+  ].filter(Boolean);
+
+  const insecureAllowed =
+    process.env.GRPC_ALLOW_INSECURE === "true" || process.env.NODE_ENV !== "production";
+  if (!insecureAllowed) {
+    throw new Error(
+      `[grpc] TLS not configured (missing: ${missing.join(", ")}). ` +
+        "Refusing to start a plaintext gRPC server in production — configure mTLS " +
+        "or set GRPC_ALLOW_INSECURE=true if transport security is provided elsewhere.",
+    );
+  }
+
+  console.warn(`[grpc] TLS not configured (missing: ${missing.join(", ")}) — using insecure credentials`);
+  return { credentials: grpc.ServerCredentials.createInsecure(), secure: false };
 }
 
 // ── Server Lifecycle ─────────────────────────────────────────────────
@@ -328,17 +410,24 @@ export function startGrpcServer(port: number): grpc.Server {
     healthCheck: handleHealthCheck,
   });
 
-  const credentials = buildServerCredentials();
+  if (!expectedServiceKey()) {
+    throw new Error("[grpc] GRPC_API_KEY (or INTERNAL_API_KEY) must be set — the gRPC server requires an API key");
+  }
+
+  const { credentials, secure } = buildServerCredentials();
+
+  // Plaintext servers stay on loopback unless the operator opts out
+  const host = process.env.GRPC_BIND_HOST || (secure ? "0.0.0.0" : "127.0.0.1");
 
   server.bindAsync(
-    `0.0.0.0:${port}`,
+    `${host}:${port}`,
     credentials,
     (err, boundPort) => {
       if (err) {
         console.error("[grpc] Failed to bind:", err);
         return;
       }
-      console.log(`[grpc] Server bound on port ${boundPort}`);
+      console.log(`[grpc] Server bound on ${host}:${boundPort}`);
     },
   );
 

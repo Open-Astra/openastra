@@ -2,6 +2,19 @@ import { z } from "zod";
 import type { SkillDefinition } from "../../types.js";
 import type { PluginContext } from "../../../plugins/types.js";
 import * as tls from "node:tls";
+import { isBlockedUrl } from "../../../utils/ssrf-guard.js";
+
+// Certificate checks open a TCP connection from the gateway, so the target
+// is validated like any other outbound request (no internal hosts, no
+// arbitrary port scanning).
+const ALLOWED_TLS_PORTS = new Set([443, 465, 563, 636, 853, 993, 995, 8443]);
+
+async function checkTarget(hostname: string, port: number): Promise<string | null> {
+  if (!/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/i.test(hostname)) return "Invalid hostname";
+  if (!ALLOWED_TLS_PORTS.has(port)) return `Port ${port} is not an allowed TLS port`;
+  if (await isBlockedUrl(`https://${hostname}:${port}/`)) return "Host is not reachable from this tool (internal or unresolvable address)";
+  return null;
+}
 
 // ── SSL Checker Skill ───────────────────────────────────────────────
 // Check SSL/TLS certificates: expiry, issuer, chain validation.
@@ -81,6 +94,8 @@ const sslCheckerSkill: SkillDefinition = {
       parameters: CheckParams,
 
       async execute(params) {
+        const blocked = await checkTarget(params.hostname, params.port);
+        if (blocked) return { hostname: params.hostname, error: blocked };
         return checkCert(params.hostname, params.port);
       },
     });
@@ -91,7 +106,12 @@ const sslCheckerSkill: SkillDefinition = {
       parameters: BatchCheckParams,
 
       async execute(params) {
-        const results = await Promise.all(params.hostnames.map((h) => checkCert(h, 443)));
+        const results = await Promise.all(
+          params.hostnames.map(async (h): Promise<Record<string, unknown>> => {
+            const blocked = await checkTarget(h, 443);
+            return blocked ? { hostname: h, error: blocked } : checkCert(h, 443);
+          }),
+        );
         const expiring = results.filter((r) => r.expiringSoon || r.expired);
         return { count: results.length, expiringCount: expiring.length, results };
       },

@@ -5,6 +5,7 @@ import {
   addEntry, searchEntries, getEntries, getEntry, updateEntry,
   deleteEntry, upvoteEntry, pruneStaleEntries,
 } from "../../agents/team-kb.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const EntryBody = z.object({
   teamId: z.string().optional(),
@@ -15,10 +16,19 @@ const EntryBody = z.object({
 });
 
 const SearchBody = z.object({
-  query: z.string(),
-  teamId: z.string().optional(),
-  limit: z.number().int().optional(),
+  query: z.string().min(1).max(2000),
+  teamId: z.string().max(128).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
 });
+
+const UpdateEntryBody = z.object({
+  title: z.string().min(1).max(500).optional(),
+  content: z.string().min(1).max(100_000).optional(),
+  tags: z.array(z.string().max(64)).max(50).optional(),
+}).strict();
+
+const UpvoteBody = z.object({ agentId: z.string().min(1).max(128) });
+const PruneBody = z.object({ olderThanDays: z.coerce.number().int().min(1).max(3650).default(30) });
 
 export function createTeamKbRouter(): Router {
   const router = Router();
@@ -39,19 +49,21 @@ export function createTeamKbRouter(): Router {
     res.json({ entries: await getEntries(workspaceId, teamId) });
   });
 
-  router.get("/team-kb/entries/:id", async (req, res) => {
-    const entry = await getEntry(req.params.id);
+  router.get("/team-kb/entries/:id", requireOwned("teamKbEntry"), async (req, res) => {
+    const entry = await getEntry(req.params.id as string);
     if (!entry) return res.status(404).json({ error: "Entry not found" });
     res.json(entry);
   });
 
-  router.put("/team-kb/entries/:id", async (req, res) => {
-    await updateEntry(req.params.id, req.body);
+  router.put("/team-kb/entries/:id", requireOwned("teamKbEntry"), async (req, res) => {
+    const parsed = UpdateEntryBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+    await updateEntry(req.params.id as string, parsed.data);
     res.json({ updated: true });
   });
 
-  router.delete("/team-kb/entries/:id", async (req, res) => {
-    await deleteEntry(req.params.id);
+  router.delete("/team-kb/entries/:id", requireOwned("teamKbEntry"), async (req, res) => {
+    await deleteEntry(req.params.id as string);
     res.json({ deleted: true });
   });
 
@@ -64,18 +76,19 @@ export function createTeamKbRouter(): Router {
     res.json({ results });
   });
 
-  router.post("/team-kb/entries/:id/upvote", async (req, res) => {
-    const { agentId } = req.body;
-    if (!agentId) return res.status(400).json({ error: "agentId required" });
-    await upvoteEntry(req.params.id, agentId);
+  router.post("/team-kb/entries/:id/upvote", requireOwned("teamKbEntry"), async (req, res) => {
+    const body = UpvoteBody.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "agentId required" });
+    await upvoteEntry(req.params.id as string, body.data.agentId);
     res.json({ upvoted: true });
   });
 
   router.post("/team-kb/prune", async (req, res) => {
     const workspaceId = (req as unknown as WorkspaceAwareRequest).workspace.workspaceId;
     if (!workspaceId) return res.status(400).json({ error: "Workspace required" });
-    const olderThanDays = parseInt(String(req.body.olderThanDays ?? "30"), 10);
-    const pruned = await pruneStaleEntries(workspaceId, olderThanDays);
+    const body = PruneBody.safeParse(req.body ?? {});
+    if (!body.success) return res.status(400).json({ error: body.error.message });
+    const pruned = await pruneStaleEntries(workspaceId, body.data.olderThanDays);
     res.json({ pruned });
   });
 

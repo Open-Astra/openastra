@@ -12,13 +12,20 @@ import {
 } from "../../workspaces/store.js";
 import { getPool } from "../../config/postgres.js";
 import { WorkspacePlan, WorkspaceRole } from "../../workspaces/types.js";
+import { findUserById } from "../../auth/store.js";
+import { isPlatformAdmin } from "../middleware/platform-admin.js";
 
 // ── Request Validation ──────────────────────────────────────────────
 
 const CreateWorkspaceBody = z.object({
   name: z.string().min(1).max(100),
-  plan: WorkspacePlan.default("team"),
+  // Only honoured for platform admins — a tenant cannot pick its own plan.
+  plan: WorkspacePlan.optional(),
 });
+
+// Plan assigned to self-service workspaces. Upgrades go through billing /
+// the platform admin key, never the client request body.
+const DEFAULT_WORKSPACE_PLAN = WorkspacePlan.catch("team").parse(process.env.DEFAULT_WORKSPACE_PLAN);
 
 const UpdateSettingsBody = z.object({
   defaultAgentId: z.string().optional(),
@@ -51,7 +58,7 @@ export function createWorkspaceRouter(): Router {
       const workspace = await createWorkspace(
         uid,
         parsed.data.name,
-        parsed.data.plan,
+        isPlatformAdmin(req) && parsed.data.plan ? parsed.data.plan : DEFAULT_WORKSPACE_PLAN,
       );
       res.status(201).json(workspace);
     } catch (err) {
@@ -166,6 +173,24 @@ export function createWorkspaceRouter(): Router {
         return;
       }
 
+      // Protect existing members above the caller: addMember upserts the
+      // role, so without this an admin could demote the owner or another admin.
+      const targetRole = await getMemberRole(id, parsed.data.uid);
+      if (targetRole === "owner") {
+        res.status(403).json({ error: "The owner's role cannot be changed" });
+        return;
+      }
+      if (role === "admin" && targetRole === "admin") {
+        res.status(403).json({ error: "Admins cannot change another admin's role" });
+        return;
+      }
+
+      // The target must be a real account
+      if (!targetRole && !(await findUserById(parsed.data.uid))) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+
       await addMember(id, parsed.data.uid, parsed.data.role, uid);
       res.status(201).json({ message: "Member added" });
     } catch (err) {
@@ -202,6 +227,23 @@ export function createWorkspaceRouter(): Router {
           .status(400)
           .json({ error: "Owner cannot remove themselves. Transfer ownership first." });
         return;
+      }
+
+      // Nobody can remove the owner; admins cannot remove other admins
+      if (!isSelfRemoval) {
+        const targetRole = await getMemberRole(id, targetUid);
+        if (!targetRole) {
+          res.status(404).json({ error: "Member not found" });
+          return;
+        }
+        if (targetRole === "owner") {
+          res.status(403).json({ error: "The owner cannot be removed. Transfer ownership first." });
+          return;
+        }
+        if (role === "admin" && targetRole === "admin") {
+          res.status(403).json({ error: "Admins cannot remove another admin" });
+          return;
+        }
       }
 
       await removeMember(id, targetUid);

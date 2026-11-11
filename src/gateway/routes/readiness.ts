@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
 import { warmUpAll, warmUpProvider, computeReadinessStatus } from "../../inference/warm-pool-probe.js";
+import { platformAdmin } from "../middleware/platform-admin.js";
+import { checkModelEndpoint } from "../middleware/model-endpoint.js";
 function getConfiguredProviders(): Array<{ provider: string; modelId: string; endpoint?: string }> {
   const providers: Array<{ provider: string; modelId: string; endpoint?: string }> = [];
 
@@ -16,10 +18,10 @@ function getConfiguredProviders(): Array<{ provider: string; modelId: string; en
 
 const WarmUpBody = z.object({
   providers: z.array(z.object({
-    provider: z.string(),
-    modelId: z.string(),
+    provider: z.string().min(1).max(32),
+    modelId: z.string().min(1).max(128),
     endpoint: z.string().url().optional(),
-  })).optional(),
+  })).max(20).optional(),
 });
 
 export function createReadinessRouter(): Router {
@@ -38,11 +40,17 @@ export function createReadinessRouter(): Router {
   });
 
   // POST /readiness/warm-up — manually warm up specific providers
-  router.post("/readiness/warm-up", async (req, res) => {
+  // Unauthenticated callers could otherwise make the gateway send provider
+  // keys to an arbitrary endpoint and burn inference credit — platform admin only.
+  router.post("/readiness/warm-up", platformAdmin(), async (req, res) => {
     const body = WarmUpBody.safeParse(req.body);
     if (!body.success) { res.status(400).json({ error: body.error.issues }); return; }
 
     const providers = body.data.providers ?? getConfiguredProviders();
+    for (const p of providers) {
+      const reason = await checkModelEndpoint(p, { isAdmin: true });
+      if (reason) { res.status(400).json({ error: reason, provider: p.provider }); return; }
+    }
     const results = await Promise.all(
       providers.map(({ provider, modelId, endpoint }) => warmUpProvider(provider, modelId, endpoint)),
     );

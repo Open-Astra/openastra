@@ -6,6 +6,7 @@ import {
   clearTestWebhookLog,
   isWebhookTestModeEnabled,
 } from "../../webhooks/test-mode.js";
+import { platformAdmin } from "../middleware/platform-admin.js";
 
 // ── Webhook Testing Router ─────────────────────────────────────────
 // POST /webhooks/test-mode/enable   — enable test mode
@@ -15,6 +16,10 @@ import {
 
 export function createWebhookTestingRouter(): Router {
   const router = Router();
+
+  // Test mode is a process-wide switch: it intercepts EVERY tenant's
+  // webhook deliveries and the log holds their payloads. Operator only.
+  router.use("/test-mode", platformAdmin());
 
   // POST /webhooks/test-mode/enable
   router.post("/test-mode/enable", (_req: Request, res: Response) => {

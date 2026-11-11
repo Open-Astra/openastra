@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { registerTool } from "./registry.js";
 import { createLogger } from "../utils/logger.js";
-import { isBlockedUrl } from "../utils/ssrf-guard.js";
+import { isBlockedUrl, safeFetch } from "../utils/ssrf-guard.js";
 
 const log = createLogger("graphql-query");
 
@@ -54,7 +54,7 @@ registerTool({
     // Step 1: Optional introspection
     if (introspect) {
       try {
-        const introRes = await fetch(endpoint, {
+        const introRes = await safeFetch(endpoint, {
           method: "POST",
           headers: baseHeaders,
           body: JSON.stringify({ query: INTROSPECTION_QUERY }),
@@ -93,7 +93,7 @@ registerTool({
 
     // Step 2: Execute the actual query
     try {
-      const res = await fetch(endpoint, {
+      const res = await safeFetch(endpoint, {
         method: "POST",
         headers: baseHeaders,
         body: JSON.stringify({

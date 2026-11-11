@@ -70,7 +70,7 @@ const seoSiteAuditSkill: SkillDefinition = {
 
           try {
             const start = Date.now();
-            const response = await safeFetch(currentUrl, { timeout: 15_000 });
+            const response = await safeFetch(currentUrl, { timeoutMs: 15_000 });
             const loadTimeMs = Date.now() - start;
             const html = await response.text();
 

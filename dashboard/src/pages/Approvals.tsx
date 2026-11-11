@@ -16,6 +16,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { mockApprovals } from "@/hooks/use-mock-data";
 import type { ApprovalRequest } from "@/types/api";
+import { DEMO_MODE } from "@/lib/demo";
 
 interface ApprovalsPayload {
   approvals: ApprovalRequest[];
@@ -73,10 +74,13 @@ export function ApprovalsPage() {
       try {
         await api.approvals.approve(id);
         return { id, status: "approved" as const, offline: false };
-      } catch {
+      } catch (err) {
+        // Outside demo mode a failed approval must surface as a failure.
+        if (!DEMO_MODE) throw err;
         return { id, status: "approved" as const, offline: true };
       }
     },
+    onError: () => toast.error("Approval failed — the gateway did not accept it"),
     onSuccess: (result) => {
       setLocalApprovals((items) => updateApprovalStatus(items, result.id, result.status));
       toast.success(result.offline ? "Approval updated locally" : "Approval granted");
@@ -89,10 +93,12 @@ export function ApprovalsPage() {
       try {
         await api.approvals.reject(id);
         return { id, status: "rejected" as const, offline: false };
-      } catch {
+      } catch (err) {
+        if (!DEMO_MODE) throw err;
         return { id, status: "rejected" as const, offline: true };
       }
     },
+    onError: () => toast.error("Rejection failed — the gateway did not accept it"),
     onSuccess: (result) => {
       setLocalApprovals((items) => updateApprovalStatus(items, result.id, result.status));
       toast.success(result.offline ? "Rejection updated locally" : "Approval rejected");

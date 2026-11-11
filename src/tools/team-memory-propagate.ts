@@ -75,7 +75,13 @@ registerTool({
 
   async execute(params, ctx) {
     const pool = getPool();
-    const workspaceId = ctx.workspaceId ?? "default";
+    // Team memory only exists inside a workspace. There is deliberately no
+    // shared "default" bucket: that pooled every workspace-less user's
+    // promoted memories together.
+    const workspaceId = ctx.workspaceId;
+    if (!workspaceId) {
+      return { error: "team_memory_propagate requires a workspace context" };
+    }
 
     switch (params.action) {
       // ── Promote: push individual learning to team ──────────────

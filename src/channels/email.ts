@@ -20,7 +20,8 @@ import type { Transporter } from "nodemailer";
 import type { ChannelAdapter, IncomingMessage, OutgoingMessage, ClientResolver } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request, Response } from "express";
+import type { IRouter, Request, Response } from "express";
+import { verifySharedSecret } from "./webhook-verify.js";
 
 const log = createLogger("email");
 
@@ -53,7 +54,7 @@ export class EmailAdapter implements ChannelAdapter {
   private transporter: Transporter;
   private fromAddress: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private webhookSecret: string | undefined;
 
   /**
@@ -72,7 +73,7 @@ export class EmailAdapter implements ChannelAdapter {
       secure?: boolean;
     },
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
     webhookSecret?: string,
   ) {
     this.fromAddress = smtpConfig.from;
@@ -125,17 +126,16 @@ export class EmailAdapter implements ChannelAdapter {
 
     if (this.app) {
       this.app.post("/webhooks/email", (req: Request, res: Response) => {
-        // Optional webhook secret verification
-        // Pass as header X-Webhook-Secret or query param ?secret=
-        if (this.webhookSecret) {
-          const provided =
-            (req.headers["x-webhook-secret"] as string | undefined) ??
-            (req.query["secret"] as string | undefined);
-          if (provided !== this.webhookSecret) {
-            log.warn("Rejected inbound email webhook — invalid secret");
-            res.sendStatus(403);
-            return;
-          }
+        // Shared-secret verification (EMAIL_WEBHOOK_SECRET). Accepted as
+        // X-Webhook-Secret, Authorization: Bearer, or HTTP Basic password
+        // (Postmark: https://user:SECRET@host/webhooks/email). The query
+        // string is not accepted — it leaks into access logs. Without a
+        // configured secret the webhook is refused: anyone could otherwise
+        // forge mail "from" any address.
+        if (!verifySharedSecret(req, this.webhookSecret)) {
+          log.warn("Rejected inbound email webhook — missing or invalid secret");
+          res.sendStatus(403);
+          return;
         }
 
         // Acknowledge before processing (Postmark retries on non-2xx)
@@ -249,7 +249,7 @@ export function startEmailChannel(
     secure?: boolean;
   },
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
   webhookSecret?: string,
 ): void {
   _adapter = new EmailAdapter(smtpConfig, resolveClient, app, webhookSecret);

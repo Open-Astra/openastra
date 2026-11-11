@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
+import { tryGuardPath } from "./path-guard.js";
 import { registerTool } from "./registry.js";
 
 // ── screenshot ────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ registerTool({
   description:
     "Capture a screenshot of the current screen. On macOS, uses the native screencapture command. On Linux, uses import (ImageMagick) or scrot. On Windows, uses PowerShell. Note: URL screenshotting requires a browser — consider using url_fetch for web content instead.",
   parameters: ScreenshotParams,
-  async execute(params) {
+  async execute(params, ctx) {
     // If a URL is provided, we can't screenshot it without a browser
     if (params.url) {
       return {
@@ -64,8 +65,17 @@ registerTool({
 
     const platform = process.platform;
     const timestamp = Date.now();
+    // A caller-chosen output path must stay inside the working directory.
+    let requestedOutput: string | undefined;
+    if (params.outputPath) {
+      const guarded = tryGuardPath(params.outputPath, { access: "write", agentId: ctx?.agentId });
+      if (!guarded.ok) {
+        return { error: guarded.error };
+      }
+      requestedOutput = guarded.path;
+    }
     const outputPath =
-      params.outputPath ||
+      requestedOutput ||
       (platform === "win32"
         ? `${process.env.TEMP || "C:\\Temp"}\\astra-screenshot-${timestamp}.png`
         : `/tmp/astra-screenshot-${timestamp}.png`);

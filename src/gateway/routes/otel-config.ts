@@ -5,6 +5,7 @@ import { jwtAuth } from "../middleware/auth.js";
 import { workspaceResolver } from "../middleware/workspace.js";
 import type { WorkspaceAwareRequest } from "../middleware/workspace.js";
 import { exportSpansToOtlp } from "../../observability/otel-exporter.js";
+import { isBlockedUrl } from "../../utils/ssrf-guard.js";
 
 // ── OTLP Config Router ────────────────────────────────────────────────
 // CRUD for per-workspace OTLP export config.
@@ -70,6 +71,12 @@ export function createOtelConfigRouter(): Router {
     }
 
     const { endpoint, headers, enabled } = parsed.data;
+
+    // SSRF: the gateway will POST traces to this URL — reject internal targets.
+    if (await isBlockedUrl(endpoint).catch(() => true)) {
+      res.status(400).json({ error: "Endpoint must be a public http(s) URL" });
+      return;
+    }
 
     try {
       const pool = getPool();

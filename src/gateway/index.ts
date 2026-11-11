@@ -16,6 +16,7 @@ import { runMigrations } from "../db/migrate.js";
 import { jwtAuth } from "./middleware/auth.js";
 import { requestLogger, errorHandler, correlationId } from "./middleware/observability.js";
 import { requestTimeout } from "./middleware/timeout.js";
+import { rateLimit } from "express-rate-limit";
 import { rateLimiter } from "./middleware/ratelimit.js";
 import { tokenBudget } from "./middleware/token-budget.js";
 import { workspaceResolver } from "./middleware/workspace.js";
@@ -369,8 +370,36 @@ app.use = ((...args: any[]) => {
   return appUse(...args);
 }) as typeof app.use;
 
+// Trust proxy — without it req.ip is the load balancer's address, so login
+// brute-force lockout, per-IP rate limits and workspace IP allowlists all
+// key on the proxy. TRUST_PROXY accepts a hop count ("1"), "true", or a
+// comma-separated list of trusted proxy addresses/CIDRs. Leave unset when
+// the gateway is directly internet-facing (X-Forwarded-For is then ignored).
+{
+  const trustProxy = process.env.TRUST_PROXY?.trim();
+  if (trustProxy && trustProxy !== "false" && trustProxy !== "0") {
+    app.set(
+      "trust proxy",
+      trustProxy === "true" ? 1 : /^\d+$/.test(trustProxy) ? parseInt(trustProxy, 10) : trustProxy,
+    );
+  }
+}
+
 // Security headers — before everything else
 app.use(securityHeaders());
+
+// Baseline per-IP rate limit for every route. Stricter per-route and per-user
+// limits are layered on top further down; this one bounds unauthenticated and
+// otherwise-unlimited endpoints. Tune with GLOBAL_RATE_LIMIT_PER_MINUTE.
+app.use(
+  rateLimit({
+    windowMs: 60_000,
+    limit: Math.max(1, parseInt(process.env.GLOBAL_RATE_LIMIT_PER_MINUTE ?? "600", 10) || 600),
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { error: "Too many requests" },
+  }),
+);
 
 // Correlation ID — stamps X-Request-ID on every request/response
 app.use(correlationId());
@@ -378,7 +407,15 @@ app.use(correlationId());
 // CORS lockdown — restrict to configured origins
 app.use(
   cors({
-    origin: env.nodeEnv === "production" ? env.allowedOrigins : true,
+    // Never reflect arbitrary origins together with credentials. Outside
+    // production, with no ALLOWED_ORIGINS configured, only loopback
+    // origins (local dashboards / dev servers) are accepted.
+    origin:
+      env.allowedOrigins.length > 0
+        ? env.allowedOrigins
+        : env.nodeEnv === "production"
+          ? false
+          : /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/,
     credentials: true,
   }),
 );
@@ -393,6 +430,15 @@ app.use(express.json({
   },
 }));
 app.use(express.urlencoded({ limit: "1mb", extended: false }));
+
+// Inbound channel webhooks (Slack, WhatsApp, GitHub, Linear, Jira, …).
+// Mounted BEFORE CSRF and before any JWT-protected "/" mount: providers
+// send neither a CSRF token nor a JWT, and each handler authenticates the
+// request itself with the provider's signature over the raw body.
+// Channels attach their routes to this router when they start.
+const channelRouter = Router();
+app.use(channelRouter);
+channelRouter.use("/jira", createJiraRouter()); // HMAC-verified (JIRA_WEBHOOK_SECRET)
 
 // CSRF protection — after JSON parsing, before routes
 app.use(csrfProtection());
@@ -559,7 +605,7 @@ app.use("/param-sweeps", jwtAuth(), workspaceResolver(), createParamSweepsRouter
 // Wave 2 (Batch 2): Developer Tools
 app.use("/otel-config", jwtAuth(), workspaceResolver(), createOtelConfigRouter());
 app.use("/prompt-templates", jwtAuth(), workspaceResolver(), createPromptTemplatesRouter());
-app.use("/playground", jwtAuth(), createPlaygroundRouter());
+app.use("/playground", jwtAuth(), licenseGuard(), tokenBudget(), userRateLimit(), createPlaygroundRouter());
 app.use("/agent-profiles", jwtAuth(), workspaceResolver(), createAgentProfilesRouter());
 app.use("/webhook-inspector", jwtAuth(), workspaceResolver(), createWebhookInspectorRouter());
 
@@ -576,7 +622,7 @@ app.use("/memory/search", jwtAuth(), workspaceResolver(), createMemorySearchApiR
 
 // Wave 5 (Batch 2): Channels
 app.use("/zapier", jwtAuth(), workspaceResolver(), createZapierRouter());
-app.use("/jira", createJiraRouter()); // Jira uses its own HMAC verification
+// (Jira webhook is mounted on channelRouter above, ahead of JWT/CSRF.)
 
 // Wave 6 (Batch 2): Security & Compliance
 app.use("/security/ip-allowlist", jwtAuth(), workspaceResolver(), createIpAllowlistRouter());
@@ -610,7 +656,10 @@ app.use("/", jwtAuth(), workspaceResolver(), createEphemeralMemoryRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createBenchmarkRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createToolStreamRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createToolCacheRouter());
-app.use("/", createReadinessRouter()); // no auth — for load balancers
+// NOTE: mounted after the JWT-protected "/" routers, so /readiness needs a
+// valid JWT (it triggers real provider calls); /readiness/warm-up also
+// needs the platform admin key. Use GET /health for unauthenticated probes.
+app.use("/", createReadinessRouter());
 app.use("/health", createHealthDashboardRouter()); // no auth — for monitoring
 app.use("/", jwtAuth(), workspaceResolver(), createFallbackTestRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createRaceRouter());
@@ -623,6 +672,8 @@ app.use("/", jwtAuth(), workspaceResolver(), createAuditVerifyRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createAlertRulesRouter());
 
 // Batch 3 (Wave 5): Developer Experience
+// Tool playground: off unless TOOL_PLAYGROUND_ENABLED=true, and then JWT +
+// platform admin key + tool allowlist (enforced inside the router).
 app.use("/", jwtAuth(), createToolPlaygroundRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createWorkspaceTemplatesRouter());
 app.use("/", jwtAuth(), workspaceResolver(), createAgentCloneRouter());
@@ -1008,17 +1059,17 @@ async function start() {
 
   // Start iMessage (BlueBubbles) if configured
   if (env.blueBubblesUrl && env.blueBubblesPassword) {
-    startIMessageChannel(env.blueBubblesUrl, env.blueBubblesPassword, resolveClient, app);
+    startIMessageChannel(env.blueBubblesUrl, env.blueBubblesPassword, resolveClient, channelRouter);
   }
 
   // Start WhatsApp if configured
   if (env.whatsappPhoneNumberId && env.whatsappAccessToken && env.whatsappVerifyToken) {
-    startWhatsAppChannel(env.whatsappPhoneNumberId, env.whatsappAccessToken, env.whatsappVerifyToken, resolveClient, app);
+    startWhatsAppChannel(env.whatsappPhoneNumberId, env.whatsappAccessToken, env.whatsappVerifyToken, resolveClient, channelRouter);
   }
 
   // Start Signal if configured
   if (env.signalApiUrl && env.signalPhoneNumber) {
-    startSignalChannel(env.signalApiUrl, env.signalPhoneNumber, resolveClient, app);
+    startSignalChannel(env.signalApiUrl, env.signalPhoneNumber, resolveClient, channelRouter);
   }
 
   // Start Discord bot if configured
@@ -1028,27 +1079,27 @@ async function start() {
 
   // Start Slack bot if configured
   if (env.slackBotToken && env.slackSigningSecret) {
-    startSlackBot(env.slackBotToken, env.slackSigningSecret, resolveClient, app);
+    startSlackBot(env.slackBotToken, env.slackSigningSecret, resolveClient, channelRouter);
   }
 
   // Start Google Chat if configured
   if (env.googleChatEnabled) {
-    startGoogleChatChannel(resolveClient, env.googleChatServiceAccountKey, app);
+    startGoogleChatChannel(resolveClient, env.googleChatServiceAccountKey, channelRouter);
   }
 
   // Start Microsoft Teams if configured
   if (env.teamsAppId && env.teamsAppPassword) {
-    startTeamsChannel(env.teamsAppId, env.teamsAppPassword, resolveClient, app);
+    startTeamsChannel(env.teamsAppId, env.teamsAppPassword, resolveClient, channelRouter);
   }
 
   // Start LINE if configured
   if (env.lineChannelAccessToken && env.lineChannelSecret) {
-    startLineChannel(env.lineChannelAccessToken, env.lineChannelSecret, resolveClient, app);
+    startLineChannel(env.lineChannelAccessToken, env.lineChannelSecret, resolveClient, channelRouter);
   }
 
   // Start Viber if configured
   if (env.viberAuthToken) {
-    startViberChannel(env.viberAuthToken, env.viberBotName ?? "Astra", resolveClient, app);
+    startViberChannel(env.viberAuthToken, env.viberBotName ?? "Astra", resolveClient, channelRouter);
   }
 
   // Start X/Twitter DMs if configured
@@ -1061,7 +1112,7 @@ async function start() {
       env.xBearerToken,
       env.xWebhookEnv ?? "dev",
       resolveClient,
-      app,
+      channelRouter,
     );
   }
 
@@ -1077,7 +1128,7 @@ async function start() {
         secure: env.smtpSecure,
       },
       resolveClient,
-      app,
+      channelRouter,
       env.emailWebhookSecret,
     );
   }
@@ -1089,7 +1140,7 @@ async function start() {
     startGitHubChannel(
       { appId: githubAppId, webhookSecret: githubWebhookSecret, installationId: process.env.GITHUB_INSTALLATION_ID },
       resolveClient,
-      app,
+      channelRouter,
     );
   }
 
@@ -1098,7 +1149,7 @@ async function start() {
     startLinearChannel(
       { webhookSecret: env.linearWebhookSecret, apiKey: env.linearApiKey },
       resolveClient,
-      app,
+      channelRouter,
     );
   }
 
@@ -1214,9 +1265,15 @@ async function start() {
 
   // Start gRPC server if enabled
   if (env.grpcEnabled) {
-    const { startGrpcServer } = await import("../grpc/server.js");
-    grpcServer = startGrpcServer(env.grpcPort);
-    log.active("gRPC", `port ${env.grpcPort}`);
+    try {
+      const { startGrpcServer } = await import("../grpc/server.js");
+      grpcServer = startGrpcServer(env.grpcPort);
+      log.active("gRPC", `port ${env.grpcPort}`);
+    } catch (err) {
+      // Refuses to start without an API key, or without TLS in production.
+      // The HTTP gateway keeps running; gRPC stays off until it is fixed.
+      log.error("gRPC server not started:", err instanceof Error ? err.message : err);
+    }
   }
 }
 

@@ -54,44 +54,80 @@ class CircuitBreaker {
     this.windowMs = options.windowMs ?? 60_000;
   }
 
-  async execute<T>(fn: () => Promise<T>): Promise<T> {
+  /**
+   * Gate a call. Throws when the circuit is OPEN and the cool-down has not
+   * elapsed; otherwise moves OPEN → HALF-OPEN once the cool-down is over.
+   * Callers that cannot use execute() (streams) call acquire(), then exactly
+   * one of recordSuccess()/recordFailure().
+   */
+  acquire(): void {
     const now = Date.now();
     this._totalRequests++;
 
     if (this.state === "open") {
       if (this.openedAt !== null && now - this.openedAt >= this.timeoutMs) {
-        // Timeout elapsed — try half-open
-        const _prevState: State = "open";
         this.state = "half-open";
         this.consecutiveSuccesses = 0;
         log.dim(`[${this.label}] → HALF-OPEN (testing recovery)`);
-        const _errRate = this._totalRequests > 0
-          ? (this._totalRequests - this._totalSuccesses) / this._totalRequests
-          : 0;
-        getPool().query(
-          `INSERT INTO circuit_breaker_history (provider, from_state, to_state, reason, total_requests, error_rate)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [this.label, _prevState, "half-open", "timeout elapsed", this._totalRequests, _errRate],
-        ).catch(() => {});
+        this.recordTransition("open", "half-open", "timeout elapsed");
       } else {
         throw new Error(`[circuit-breaker] ${this.label} is OPEN — fast failing`);
       }
     }
+  }
+
+  recordSuccess(durationMs: number): void {
+    this.recordLatency(durationMs);
+    this._totalSuccesses++;
+    this.onSuccess();
+  }
+
+  recordFailure(durationMs: number): void {
+    const now = Date.now();
+    this.recordLatency(durationMs);
+    this._lastFailureAt = now;
+    this.onFailure(now);
+  }
+
+  /**
+   * Run fn through the breaker.
+   * @param isFailure - decides whether an error reflects provider health.
+   *   Errors for which it returns false (bad request, auth, context-too-long…)
+   *   prove the provider is reachable, so they do NOT count toward opening the
+   *   circuit. Defaults to counting every error.
+   */
+  async execute<T>(fn: () => Promise<T>, isFailure?: (err: unknown) => boolean): Promise<T> {
+    this.acquire();
 
     const start = Date.now();
     try {
       const result = await fn();
-      const duration = Date.now() - start;
-      this.recordLatency(duration);
-      this._totalSuccesses++;
-      this.onSuccess();
+      this.recordSuccess(Date.now() - start);
       return result;
     } catch (err) {
-      const duration = Date.now() - start;
-      this.recordLatency(duration);
-      this._lastFailureAt = now;
-      this.onFailure(now);
+      if (isFailure && !isFailure(err)) {
+        // Provider answered — a caller-side error must not trip the breaker.
+        this.recordLatency(Date.now() - start);
+        this.onSuccess();
+      } else {
+        this.recordFailure(Date.now() - start);
+      }
       throw err;
+    }
+  }
+
+  private recordTransition(from: State, to: State, reason: string): void {
+    const errRate = this._totalRequests > 0
+      ? (this._totalRequests - this._totalSuccesses) / this._totalRequests
+      : 0;
+    try {
+      getPool().query(
+        `INSERT INTO circuit_breaker_history (provider, from_state, to_state, reason, total_requests, error_rate)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [this.label, from, to, reason, this._totalRequests, errRate],
+      ).catch(() => {});
+    } catch {
+      // Pool not initialised (CLI/tests) — history is best-effort telemetry.
     }
   }
 

@@ -19,6 +19,7 @@ import type {
   PromptVersion,
   AnomalyAlert,
 } from "@/types/api";
+import { DEMO_MODE } from "@/lib/demo";
 
 function randomSparkline(length = 20, min = 10, max = 100): number[] {
   const data: number[] = [];
@@ -31,7 +32,7 @@ function randomSparkline(length = 20, min = 10, max = 100): number[] {
   return data;
 }
 
-export const mockAgents: Agent[] = [
+const _mockAgents: Agent[] = [
   {
     id: "orchestrator",
     displayName: "Orchestrator",
@@ -98,7 +99,7 @@ export const mockAgents: Agent[] = [
   },
 ];
 
-export const mockSwarms: Swarm[] = [
+const _mockSwarms: Swarm[] = [
   {
     id: "research-team",
     name: "Research Team",
@@ -119,10 +120,10 @@ export const mockSwarms: Swarm[] = [
   },
 ];
 
-export const mockSessions: Session[] = Array.from({ length: 20 }, (_, i) => ({
+const _mockSessions: Session[] = Array.from({ length: 20 }, (_, i) => ({
   id: `session-${String(i + 1).padStart(3, "0")}`,
-  agentId: mockAgents[i % mockAgents.length]!.id,
-  agentName: mockAgents[i % mockAgents.length]!.displayName,
+  agentId: _mockAgents[i % _mockAgents.length]!.id,
+  agentName: _mockAgents[i % _mockAgents.length]!.displayName,
   surface: "chat" as const,
   createdAt: new Date(Date.now() - (i * 3_600_000 + Math.random() * 3_600_000)).toISOString(),
   lastActiveAt: new Date(Date.now() - i * 1_800_000).toISOString(),
@@ -135,6 +136,7 @@ export const mockSessions: Session[] = Array.from({ length: 20 }, (_, i) => ({
 
 // Mock messages keyed by session ID — returns sample conversation for any session
 export function getMockMessages(sessionId: string): Message[] {
+  if (!DEMO_MODE) return [];
   const base = Date.now() - 300_000;
   return [
     { id: `${sessionId}-m1`, role: "user", content: "Can you help me analyze the latest performance metrics and identify any bottlenecks?", timestamp: new Date(base).toISOString() },
@@ -148,7 +150,7 @@ export function getMockMessages(sessionId: string): Message[] {
   ];
 }
 
-export const mockProviders: InferenceProvider[] = [
+const _mockProviders: InferenceProvider[] = [
   { id: "anthropic", name: "Anthropic", connected: true, latency: 320, models: ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"], requestsToday: 284, tokensToday: 1_420_000, costToday: 4.26, status: "healthy" },
   { id: "openai", name: "OpenAI", connected: true, latency: 450, models: ["gpt-4o", "gpt-4o-mini"], requestsToday: 156, tokensToday: 890_000, costToday: 2.67, status: "healthy" },
   { id: "google", name: "Google AI", connected: true, latency: 280, models: ["gemini-2.5-flash", "gemini-2.5-pro"], requestsToday: 92, tokensToday: 520_000, costToday: 0.52, status: "healthy" },
@@ -156,7 +158,7 @@ export const mockProviders: InferenceProvider[] = [
   { id: "ollama", name: "Ollama (Local)", connected: false, models: ["llama3.3", "qwen2.5"], requestsToday: 0, tokensToday: 0, status: "down" },
 ];
 
-export const mockChannels: Channel[] = [
+const _mockChannels: Channel[] = [
   { id: "telegram", type: "telegram", name: "Telegram Bot", connected: true, lastActivity: new Date().toISOString() },
   { id: "discord", type: "discord", name: "Discord Bot", connected: true, lastActivity: new Date(Date.now() - 300_000).toISOString() },
   { id: "slack", type: "slack", name: "Slack Integration", connected: false },
@@ -164,7 +166,7 @@ export const mockChannels: Channel[] = [
   { id: "webhook", type: "webhook", name: "Webhooks", connected: true, lastActivity: new Date(Date.now() - 60_000).toISOString() },
 ];
 
-export const mockDashboardStats: DashboardStats = {
+const _mockDashboardStats: DashboardStats = {
   activeAgents: 2,
   activeSwarms: 1,
   runningSessions: 3,
@@ -195,7 +197,7 @@ export const mockDashboardStats: DashboardStats = {
   inferenceHistory: randomSparkline(24, 5, 40),
 };
 
-export const mockEvents: LiveEvent[] = [
+const _mockEvents: LiveEvent[] = [
   { id: "e1", type: "agent_start", agentName: "Orchestrator", content: "Started new session for user request", timestamp: new Date(Date.now() - 10_000).toISOString() },
   { id: "e2", type: "tool_call", agentName: "Research Agent", content: "Called web_search('latest AI benchmarks 2026')", timestamp: new Date(Date.now() - 30_000).toISOString() },
   { id: "e3", type: "handoff", agentName: "Orchestrator", content: "Delegated research task to Research Agent", timestamp: new Date(Date.now() - 45_000).toISOString() },
@@ -206,7 +208,7 @@ export const mockEvents: LiveEvent[] = [
   { id: "e8", type: "spawn", agentName: "Orchestrator", content: "Spawned sub-agent 'Fact Checker' for verification task", timestamp: new Date(Date.now() - 180_000).toISOString() },
 ];
 
-export const mockMemoryEntries: MemoryEntry[] = [
+const _mockMemoryEntries: MemoryEntry[] = [
   { id: "m1", tier: "ephemeral", content: "User asked about latest AI benchmarks", timestamp: new Date().toISOString() },
   { id: "m2", tier: "ephemeral", content: "Current session context: research task on ML performance", timestamp: new Date().toISOString() },
   { id: "m3", tier: "daily", content: "User prefers concise responses with code examples", category: "preference", weight: 0.8, timestamp: new Date().toISOString() },
@@ -217,7 +219,7 @@ export const mockMemoryEntries: MemoryEntry[] = [
   { id: "m8", tier: "procedural", content: "Workflow: When user asks for code review → read file → analyze → suggest improvements → apply if approved", category: "workflow", weight: 0.85, timestamp: new Date(Date.now() - 86_400_000 * 5).toISOString() },
 ];
 
-export const mockSkillGraph: SkillGraph = {
+const _mockSkillGraph: SkillGraph = {
   nodes: [
     { id: "researcher", name: "Research Agent", tools: ["web_search", "url_fetch"], composes: ["summary"], requires: ["search"], category: "analysis", version: "1.4.0" },
     { id: "coder", name: "Code Agent", tools: ["code_execute", "file_write"], composes: ["validation"], requires: ["analysis"], category: "engineering", version: "1.2.0" },
@@ -232,14 +234,14 @@ export const mockSkillGraph: SkillGraph = {
   ],
 };
 
-export const mockSkillGraphValidation: SkillGraphValidation = {
+const _mockSkillGraphValidation: SkillGraphValidation = {
   valid: true,
   errors: [],
   warnings: ["1 skill uses a fallback tool chain", "2 skills are in beta"],
   cycles: [],
 };
 
-export const mockApprovals: ApprovalRequest[] = [
+const _mockApprovals: ApprovalRequest[] = [
   {
     id: "apr-1",
     workspaceId: "workspace-1",
@@ -270,7 +272,7 @@ export const mockApprovals: ApprovalRequest[] = [
   },
 ];
 
-export const mockPromptVersions: Record<string, PromptVersion[]> = {
+const _mockPromptVersions: Record<string, PromptVersion[]> = {
   orchestrator: [
     {
       id: "pv-1",
@@ -307,7 +309,7 @@ export const mockPromptVersions: Record<string, PromptVersion[]> = {
   ],
 };
 
-export const mockAnomalyAlerts: AnomalyAlert[] = [
+const _mockAnomalyAlerts: AnomalyAlert[] = [
   {
     id: "alert-1",
     ruleId: "runaway_loop",
@@ -346,7 +348,7 @@ export const mockAnomalyAlerts: AnomalyAlert[] = [
   },
 ];
 
-export const mockScheduledTasks: ScheduledTask[] = [
+const _mockScheduledTasks: ScheduledTask[] = [
   {
     id: "st-001",
     uid: "user-1",
@@ -416,3 +418,40 @@ export const mockScheduledTasks: ScheduledTask[] = [
     updatedAt: new Date(Date.now() - 86_400_000 * 14).toISOString(),
   },
 ];
+
+// ── Gated exports ────────────────────────────────────────────────────
+// Outside demo mode (see lib/demo.ts) every export below is EMPTY, so a
+// production build can never present sample data as if it were real.
+
+export const mockAgents: Agent[] = DEMO_MODE ? _mockAgents : [];
+export const mockSwarms: Swarm[] = DEMO_MODE ? _mockSwarms : [];
+export const mockSessions: Session[] = DEMO_MODE ? _mockSessions : [];
+export const mockProviders: InferenceProvider[] = DEMO_MODE ? _mockProviders : [];
+export const mockChannels: Channel[] = DEMO_MODE ? _mockChannels : [];
+export const mockDashboardStats: DashboardStats = DEMO_MODE ? _mockDashboardStats : {
+  activeAgents: 0,
+  activeSwarms: 0,
+  runningSessions: 0,
+  totalInferencesToday: 0,
+  totalTokensToday: 0,
+  totalCostToday: 0,
+  systemHealth: {
+    cpu: { usage: 0, cores: 0 },
+    memory: { used: 0, total: 0, percentage: 0 },
+    disk: { used: 0, total: 0, percentage: 0 },
+    uptime: 0,
+  },
+  memoryUsage: { ephemeral: 0, daily: 0, longTerm: 0, graph: 0, procedural: 0 },
+  topProviders: [],
+  cpuHistory: [],
+  memoryHistory: [],
+  inferenceHistory: [],
+};
+export const mockEvents: LiveEvent[] = DEMO_MODE ? _mockEvents : [];
+export const mockMemoryEntries: MemoryEntry[] = DEMO_MODE ? _mockMemoryEntries : [];
+export const mockSkillGraph: SkillGraph = DEMO_MODE ? _mockSkillGraph : { nodes: [], edges: [] };
+export const mockSkillGraphValidation: SkillGraphValidation = DEMO_MODE ? _mockSkillGraphValidation : { valid: true, errors: [], warnings: [], cycles: [] };
+export const mockApprovals: ApprovalRequest[] = DEMO_MODE ? _mockApprovals : [];
+export const mockPromptVersions: Record<string, PromptVersion[]> = DEMO_MODE ? _mockPromptVersions : {};
+export const mockAnomalyAlerts: AnomalyAlert[] = DEMO_MODE ? _mockAnomalyAlerts : [];
+export const mockScheduledTasks: ScheduledTask[] = DEMO_MODE ? _mockScheduledTasks : [];

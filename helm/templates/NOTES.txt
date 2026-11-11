@@ -51,7 +51,7 @@ Release: {{ .Release.Name }} | Namespace: {{ .Release.Namespace }}
 WARNING: secret.create is false. You must create a Kubernetes Secret named
 "{{ include "astra.secretName" . }}" containing:
   JWT_SECRET, INTERNAL_API_KEY, TYPESENSE_API_KEY,
-  PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD
+  PG_PASSWORD
 
 See k8s/external-secrets.yaml for an External Secrets Operator example.
 {{- end }}

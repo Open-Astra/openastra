@@ -3,7 +3,8 @@ import { findOrCreateEntity } from "./graph.js";
 import type { EntityType } from "./graph.js";
 
 // ── Memory Deduplication ─────────────────────────────────────────────
-// Background job that finds near-duplicate memory entries (cosine
+// Background job that finds near-duplicate memory entries in memory_chunks
+// (the per-entry embedding table, migration 200) with cosine
 // similarity >= 0.92) and consolidates them into graph entities.
 
 interface DedupResult {
@@ -26,7 +27,7 @@ export async function runMemoryDeduplication(uid: string): Promise<DedupResult> 
 
   // Step 1: Verify there are recent entries with embeddings
   const { rows: recentRows } = await pool.query<{ id: string }>(
-    `SELECT id FROM daily_memories
+    `SELECT id FROM memory_chunks
      WHERE uid = $1 AND embedding IS NOT NULL
        AND created_at > NOW() - INTERVAL '30 days'
      LIMIT 100`,
@@ -46,10 +47,10 @@ export async function runMemoryDeduplication(uid: string): Promise<DedupResult> 
        b.id AS id_b,
        a.content AS content_a,
        b.content AS content_b,
-       a.category,
+       COALESCE(a.category, 'concept') AS category,
        1 - (a.embedding <=> b.embedding) AS similarity
-     FROM daily_memories a
-     JOIN daily_memories b
+     FROM memory_chunks a
+     JOIN memory_chunks b
        ON a.uid = b.uid AND a.id < b.id
           AND 1 - (a.embedding <=> b.embedding) >= 0.92
      WHERE a.uid = $1

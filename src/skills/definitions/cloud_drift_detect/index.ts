@@ -145,7 +145,7 @@ function generateDriftData(provider: string, iacTool: string, stackName?: string
   return driftItems;
 }
 
-function generateRemediationPlan(provider: string, iacTool: string, resourceIds: string[]): {
+function generateRemediationPlan(_provider: string, iacTool: string, resourceIds: string[]): {
   commands: string[];
   warnings: string[];
   impact: { resourcesModified: number; estimatedDowntime: string };

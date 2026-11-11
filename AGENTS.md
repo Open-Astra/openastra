@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents working with code in this repository.
 
 ## Project Overview
 
-Astra is a multi-agent runtime platform with dynamic agent creation, 92 built-in skills, 32 tools, hierarchical swarm orchestration, and a plug-and-play inference layer supporting 7 LLM providers (Grok, Groq, OpenAI, Gemini, Codex, Ollama, vLLM). Three deployment modes: zero-config `npx astra`, Docker Compose, or standalone CLI.
+Astra is a multi-agent runtime platform with dynamic agent creation, 120+ built-in skills, ~100 tools, hierarchical swarm orchestration, and a plug-and-play inference layer supporting 11 LLM providers (Grok, Groq, OpenAI, Gemini, Claude, Ollama, vLLM, OpenRouter, Mistral, Bedrock, edge). Three deployment modes: zero-config `npx astra`, Docker Compose, or standalone CLI.
 
 ## Commands
 
@@ -32,7 +32,12 @@ docker compose up -d postgres typesense   # Services only
 docker compose up -d                       # Full stack including gateway
 ```
 
-No test suite is configured. Use `npm run typecheck` to verify correctness.
+```bash
+npm test             # Vitest suite (tests/)
+npm run ci           # typecheck + coverage + build — what CI runs
+```
+
+Run `npm run typecheck` and `npm test` after every change.
 
 ## Architecture — Request Flow
 
@@ -44,7 +49,7 @@ HTTP/WS/Channel Message
         1. sessions/store.ts — resolve or create session by {uid, surface, surfaceId}
         2. sessions/compaction.ts — summarize old messages if context too large
         3. context/assembler.ts — SOUL.md prefix + system prompt + memory + history → ChatMessage[]
-        4. inference/factory.ts → provider client (grok|groq|openai|gemini|Codex|ollama|vllm)
+        4. inference/factory.ts → provider client (grok|groq|openai|gemini|claude|ollama|vllm|openrouter|mistral|bedrock|edge)
         5. tools/registry.ts — execute tool calls, feed results back (max 5 rounds)
         6. agents/post-turn-save.ts — auto-save memory
         7. events/bus.ts — emit typed events, fire webhooks
@@ -106,17 +111,17 @@ Skills are auto-discovered from `src/skills/definitions/*/index.ts` at startup. 
 
 ### Inference Provider Interface
 
-All 7 providers implement `InferenceClient` from `inference/types.ts`:
+All providers implement `InferenceClient` from `inference/types.ts`:
 - `chat(request: InferenceRequest): Promise<InferenceResponse>`
 - `chatStream(request: InferenceRequest): AsyncGenerator<InferenceStreamDelta>`
 
-The factory (`inference/factory.ts`) creates clients on demand, caches by `provider:modelId:endpoint` key, and wraps each in a resilient layer (retry + fallback + circuit breaker). Provider enum: `grok | groq | openai | gemini | Codex | ollama | vllm`.
+The factory (`inference/factory.ts`) creates clients on demand, caches by `provider:modelId:endpoint` key, and wraps each in a resilient layer (retry + fallback + circuit breaker). Provider enum (source of truth: `src/agents/types.ts`): `grok | groq | openai | gemini | claude | vllm | ollama | openrouter | mistral | bedrock | edge`.
 
 `inference/circuit-breaker.ts` — per-provider CircuitBreaker (closed → open → half-open). Tripped providers are skipped immediately in the resilient layer rather than timing out on every call.
 
 ### SOUL.md as Cached Prompt Prefix
 
-`SOUL.md` defines ethical constraints for all agents. Loaded once on startup, cached in process memory, and prepended to every system prompt as a stable prefix. This enables provider-side prompt caching (Codex, OpenAI, Gemini all cache stable prefixes).
+`SOUL.md` defines ethical constraints for all agents. Loaded once on startup, cached in process memory, and prepended to every system prompt as a stable prefix. This enables provider-side prompt caching (Claude, OpenAI, Gemini all cache stable prefixes).
 
 ### Context Assembly
 
@@ -215,7 +220,7 @@ Typed event bus (`events/bus.ts`) with Zod-validated payloads. Key events: `agen
 3. Register start/stop in `src/gateway/index.ts`
 
 ### New database migration
-1. Create `src/db/migrations/NNN-description.sql` (next number is 031)
+1. Create `src/db/migrations/NNN-description.sql` (use the next unused number — `ls src/db/migrations | tail -1`; `tests/db/migration-numbering.test.ts` fails on a reused prefix)
 2. Runs automatically on startup in alphabetical order, tracked by **filename** in `schema_migrations`
 3. Never reuse a number prefix — two `023-*.sql` files both run but the second's `IF NOT EXISTS` is a no-op, silently leaving schema differences unresolved
 

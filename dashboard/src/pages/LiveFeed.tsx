@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { useEventStore } from "@/stores/events";
 import { mockEvents } from "@/hooks/use-mock-data";
 import type { LiveEvent } from "@/types/api";
+import { DEMO_MODE } from "@/lib/demo";
 
 const typeConfig: Record<string, { icon: typeof Bot; color: string; bg: string; label: string }> = {
   agent_start: { icon: Bot, color: "text-emerald-400", bg: "bg-emerald-500/10", label: "Start" },
@@ -70,7 +71,9 @@ export function LiveFeedPage() {
   }, [storeEvents]);
 
   useEffect(() => {
-    if (paused) return;
+    // Synthetic events are generated in demo mode only; otherwise the feed
+    // shows exactly what arrives over the gateway WebSocket.
+    if (paused || !DEMO_MODE) return;
     const interval = setInterval(() => {
       counterRef.current++;
       const evt = generateLiveEvent(counterRef.current);

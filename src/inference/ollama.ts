@@ -116,7 +116,7 @@ export function createOllamaClient(
         max_tokens: request.maxTokens,
         stream: false,
         ...ollamaOptions && { options: ollamaOptions },
-      } as any);
+      } as any, { signal: request.signal });
 
       const choice = response.choices[0]!;
 
@@ -161,7 +161,7 @@ export function createOllamaClient(
         max_tokens: request.maxTokens,
         stream: true,
         ...ollamaOptions && { options: ollamaOptions },
-      } as any) as unknown as AsyncIterable<OpenAI.ChatCompletionChunk>;
+      } as any, { signal: request.signal }) as unknown as AsyncIterable<OpenAI.ChatCompletionChunk>;
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;

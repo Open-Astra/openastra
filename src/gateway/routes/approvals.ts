@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import type { WorkspaceAwareRequest } from "../middleware/workspace.js";
+import type { AuthenticatedRequest } from "../middleware/auth.js";
+import { requireRole } from "../middleware/rbac.js";
 import { getPool } from "../../config/postgres.js";
 
 export function createApprovalsRouter(): Router {
@@ -49,7 +51,7 @@ export function createApprovalsRouter(): Router {
   });
 
   // POST /approvals/:id/approve
-  router.post("/:id/approve", async (req: Request, res: Response) => {
+  router.post("/:id/approve", requireRole("editor"), async (req: Request, res: Response) => {
     const workspace = (req as WorkspaceAwareRequest).workspace;
     const workspaceId = workspace?.workspaceId;
     if (!workspaceId) {
@@ -57,7 +59,7 @@ export function createApprovalsRouter(): Router {
       return;
     }
 
-    const uid = (req as any).user?.uid as string | undefined;
+    const uid = (req as unknown as AuthenticatedRequest).uid as string | undefined;
     if (!uid) {
       res.status(401).json({ error: "Authentication required" });
       return;
@@ -84,7 +86,7 @@ export function createApprovalsRouter(): Router {
   });
 
   // POST /approvals/:id/reject
-  router.post("/:id/reject", async (req: Request, res: Response) => {
+  router.post("/:id/reject", requireRole("editor"), async (req: Request, res: Response) => {
     const workspace = (req as WorkspaceAwareRequest).workspace;
     const workspaceId = workspace?.workspaceId;
     if (!workspaceId) {
@@ -92,7 +94,7 @@ export function createApprovalsRouter(): Router {
       return;
     }
 
-    const uid = (req as any).user?.uid as string | undefined;
+    const uid = (req as unknown as AuthenticatedRequest).uid as string | undefined;
     if (!uid) {
       res.status(401).json({ error: "Authentication required" });
       return;

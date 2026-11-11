@@ -176,7 +176,7 @@ export class DataPlaneManager {
     return request;
   }
 
-  applyDlp(payload: string, tenantId?: string): { sanitized: string; redactions: string[]; blocked: boolean; blockReason?: string } {
+  applyDlp(payload: string, _tenantId?: string): { sanitized: string; redactions: string[]; blocked: boolean; blockReason?: string } {
     let sanitized = payload;
     const redactions: string[] = [];
     let blocked = false;

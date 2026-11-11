@@ -142,6 +142,12 @@ vi.mock("../../src/agents/goals.js", () => ({
 
 vi.mock("../../src/utils/ssrf-guard.js", () => ({
   isBlockedUrl: vi.fn().mockResolvedValue(false),
+  safeFetch: vi.fn().mockResolvedValue({ ok: true, status: 200 }),
+}));
+
+vi.mock("../../src/cache/semantic.js", () => ({
+  getSemanticCache: vi.fn().mockResolvedValue(null),
+  setSemanticCache: vi.fn().mockResolvedValue(undefined),
 }));
 
 // All vi.mock calls are done — now import the module under test and helpers
@@ -161,6 +167,8 @@ import { assembleContext } from "../../src/context/assembler.js";
 import { executeTool, getToolSchemas } from "../../src/tools/index.js";
 import { getEventBus } from "../../src/events/index.js";
 import type { MessageDoc } from "../../src/sessions/types.js";
+import { isBlockedUrl, safeFetch } from "../../src/utils/ssrf-guard.js";
+import { getSemanticCache, setSemanticCache } from "../../src/cache/semantic.js";
 
 // ── beforeEach ──────────────────────────────────────────────────────
 
@@ -414,5 +422,126 @@ describe("runAgentLoop", () => {
     // Verify "agent.completed" payload contains the response content
     const completedPayload = emitCalls[completedIdx][1] as Record<string, unknown>;
     expect(completedPayload).toHaveProperty("content", "Test");
+  });
+});
+
+// ── Session webhook ─────────────────────────────────────────────────
+
+describe("runAgentLoop — session webhook", () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  function sessionWithWebhook(url: string) {
+    const resolved = createMockSession("sess-1");
+    resolved.session.webhookUrl = url;
+    return resolved;
+  }
+
+  beforeEach(() => {
+    vi.mocked(isBlockedUrl).mockResolvedValue(false);
+    vi.mocked(safeFetch).mockResolvedValue({ ok: true, status: 200 } as Response);
+  });
+
+  it("posts the completed turn through the SSRF-safe fetch", async () => {
+    vi.mocked(resolveSession).mockResolvedValue(sessionWithWebhook("https://hooks.example.com/turn"));
+    const client = createMockInferenceClient([makeTextResponse("Done")]);
+
+    await runAgentLoop("user-1", "Hi", createTestAgentConfig(), client);
+    await flush();
+
+    expect(safeFetch).toHaveBeenCalledOnce();
+    const [url, init] = vi.mocked(safeFetch).mock.calls[0]!;
+    expect(url).toBe("https://hooks.example.com/turn");
+    const body = JSON.parse(String((init as { body: string }).body));
+    expect(body).toMatchObject({ event: "agent.turn.completed", sessionId: "sess-1", content: "Done" });
+  });
+
+  it("does not call a webhook URL the SSRF guard blocks", async () => {
+    vi.mocked(isBlockedUrl).mockResolvedValue(true);
+    vi.mocked(resolveSession).mockResolvedValue(sessionWithWebhook("http://169.254.169.254/latest/meta-data"));
+    const client = createMockInferenceClient([makeTextResponse("Done")]);
+
+    const result = await runAgentLoop("user-1", "Hi", createTestAgentConfig(), client);
+    await flush();
+
+    expect(result.content).toBe("Done");
+    expect(safeFetch).not.toHaveBeenCalled();
+  });
+
+  it("a failing webhook does not fail the turn", async () => {
+    vi.mocked(safeFetch).mockRejectedValue(new Error("connection refused"));
+    vi.mocked(resolveSession).mockResolvedValue(sessionWithWebhook("https://hooks.example.com/turn"));
+    const client = createMockInferenceClient([makeTextResponse("Done")]);
+
+    const result = await runAgentLoop("user-1", "Hi", createTestAgentConfig(), client);
+    await flush();
+
+    expect(result.content).toBe("Done");
+  });
+});
+
+// ── Semantic cache scoping ──────────────────────────────────────────
+
+describe("runAgentLoop — semantic cache", () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  beforeEach(() => {
+    vi.stubEnv("SEMANTIC_CACHE_ENABLED", "true");
+    // The cache only applies to pure chat turns (no tools on offer).
+    vi.mocked(getToolSchemas).mockReturnValue([]);
+    vi.mocked(getSemanticCache).mockResolvedValue(null);
+    vi.mocked(setSemanticCache).mockResolvedValue(undefined);
+    return () => vi.unstubAllEnvs();
+  });
+
+  it("looks up and stores entries scoped to the caller's user and workspace", async () => {
+    const client = createMockInferenceClient([makeTextResponse("Fresh answer")]);
+
+    const result = await runAgentLoop("user-1", "cache question 1", createTestAgentConfig(), client, undefined, "ws-1");
+    await flush();
+
+    expect(result.content).toBe("Fresh answer");
+    expect(getSemanticCache).toHaveBeenCalledWith("cache question 1", "test-agent", { uid: "user-1", workspaceId: "ws-1" });
+    expect(setSemanticCache).toHaveBeenCalledWith("cache question 1", "Fresh answer", "test-agent", { uid: "user-1", workspaceId: "ws-1" });
+  });
+
+  it("uses a null workspace scope for personal sessions", async () => {
+    const client = createMockInferenceClient([makeTextResponse("Fresh answer")]);
+
+    await runAgentLoop("user-1", "cache question 2", createTestAgentConfig(), client);
+
+    expect(getSemanticCache).toHaveBeenCalledWith("cache question 2", "test-agent", { uid: "user-1", workspaceId: null });
+  });
+
+  it("returns a cache hit without calling the model", async () => {
+    vi.mocked(getSemanticCache).mockResolvedValue({ content: "Cached answer" } as Awaited<ReturnType<typeof getSemanticCache>>);
+    const client = createMockInferenceClient([makeTextResponse("Fresh answer")]);
+
+    const result = await runAgentLoop("user-1", "cache question 3", createTestAgentConfig(), client, undefined, "ws-1");
+
+    expect(result.content).toBe("Cached answer");
+    expect(result.toolResults).toEqual([]);
+    expect(vi.mocked(client.chat)).not.toHaveBeenCalled();
+    expect(setSemanticCache).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the model when the cache lookup fails", async () => {
+    vi.mocked(getSemanticCache).mockRejectedValue(new Error("pgvector unavailable"));
+    const client = createMockInferenceClient([makeTextResponse("Fresh answer")]);
+
+    const result = await runAgentLoop("user-1", "cache question 4", createTestAgentConfig(), client);
+
+    expect(result.content).toBe("Fresh answer");
+    expect(vi.mocked(client.chat)).toHaveBeenCalledOnce();
+  });
+
+  it("is skipped entirely when the feature flag is off", async () => {
+    vi.stubEnv("SEMANTIC_CACHE_ENABLED", "false");
+    const client = createMockInferenceClient([makeTextResponse("Fresh answer")]);
+
+    await runAgentLoop("user-1", "cache question 5", createTestAgentConfig(), client);
+    await flush();
+
+    expect(getSemanticCache).not.toHaveBeenCalled();
+    expect(setSemanticCache).not.toHaveBeenCalled();
   });
 });

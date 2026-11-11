@@ -2,7 +2,11 @@ import { useEffect, useRef, useCallback } from "react";
 import { useEventStore } from "@/stores/events";
 import type { LiveEvent } from "@/types/api";
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? `ws://${window.location.host}/ws/events`;
+// The gateway's WebSocket endpoint is /ws. Scheme follows the page: wss on
+// HTTPS (a ws:// socket is blocked as mixed content there), ws on HTTP.
+const WS_URL =
+  import.meta.env.VITE_WS_URL ??
+  `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
 export function useWebSocket(enabled: boolean = true) {
   const wsRef = useRef<WebSocket | null>(null);
@@ -13,12 +17,11 @@ export function useWebSocket(enabled: boolean = true) {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const token = localStorage.getItem("astra_token");
-    const url = token ? `${WS_URL}?token=${token}` : WS_URL;
-    const ws = new WebSocket(url);
-
-    ws.onopen = () => {
-      console.log("[WS] Connected to event stream");
-    };
+    // Real JWTs only (never the dev-mode mock token) — and passed in the
+    // "bearer.<jwt>" subprotocol, not the query string, so the token does
+    // not end up in proxy/access logs or browser history.
+    if (!token || token.split(".").length !== 3) return;
+    const ws = new WebSocket(WS_URL, [`bearer.${token}`]);
 
     ws.onmessage = (e) => {
       try {
@@ -29,8 +32,9 @@ export function useWebSocket(enabled: boolean = true) {
       }
     };
 
-    ws.onclose = () => {
-      console.log("[WS] Disconnected, reconnecting in 3s...");
+    ws.onclose = (e) => {
+      // 4001/4003: the gateway rejected the token — retrying cannot succeed.
+      if (e.code === 4001 || e.code === 4003) return;
       reconnectTimer.current = setTimeout(connect, 3000);
     };
 

@@ -9,6 +9,7 @@
 
 import { getPool } from "../config/postgres.js";
 import { createLogger } from "../utils/logger.js";
+import { openWorkspaceSecret, sealWorkspaceSecret } from "../workspaces/secrets.js";
 
 const logger = createLogger("channel-token-manager");
 
@@ -54,7 +55,7 @@ export async function getChannelToken(
       );
 
       if (rows.length > 0) {
-        const token = rows[0]!.secret_value;
+        const { value: token } = await openWorkspaceSecret(workspaceId, tokenKey, rows[0]!.secret_value);
 
         // Audit log the token retrieval
         if (uid) {
@@ -119,7 +120,7 @@ export async function setChannelToken(
          set_by = EXCLUDED.set_by,
          expires_at = EXCLUDED.expires_at,
          updated_at = NOW()`,
-      [workspaceId, tokenKey, token, uid, expiresAt],
+      [workspaceId, tokenKey, await sealWorkspaceSecret(workspaceId, tokenKey, token), uid, expiresAt],
     );
 
     logger.info(`Channel token set: ${workspaceId}/${tokenKey} by ${uid}`);

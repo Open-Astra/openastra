@@ -21,8 +21,8 @@ import type {
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Express, Request, Response } from "express";
-import express from "express";
+import type { IRouter, Request, Response } from "express";
+import { getRawBody } from "./webhook-verify.js";
 
 const log = createLogger("github-channel");
 
@@ -167,15 +167,20 @@ let _adapter: GitHubAdapter | null = null;
 export function startGitHubChannel(
   config: GitHubChannelConfig,
   resolveClient: ClientResolver,
-  app: Express,
+  app: IRouter,
 ): void {
   _adapter = new GitHubAdapter();
 
   app.post(
     "/channels/github/webhook",
-    express.raw({ type: "application/json" }),
     async (req: Request, res: Response) => {
-      const rawBody = req.body as Buffer;
+      // The global express.json() middleware has already consumed the
+      // stream; the exact bytes GitHub signed are stashed as req.rawBody.
+      const rawBody = getRawBody(req);
+      if (!rawBody) {
+        res.status(400).json({ error: "Missing request body" });
+        return;
+      }
       const signature =
         (req.headers["x-hub-signature-256"] as string | undefined) ?? "";
       const eventType =
