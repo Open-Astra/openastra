@@ -1,3 +1,4 @@
+import { uidFilter } from "./ts-filter.js";
 import { randomUUID } from "node:crypto";
 import { getPool } from "../config/postgres.js";
 import { generateEmbedding } from "./embeddings.js";
@@ -259,7 +260,7 @@ export async function searchProcedures(
         .search({
           q: query,
           query_by: "name,description,trigger",
-          filter_by: `uid:=${uid}`,
+          filter_by: uidFilter(uid),
           vector_query: `embedding:([${queryEmbedding.join(",")}], k:${topK * 2})`,
           per_page: topK,
           exclude_fields: "embedding",

@@ -30,7 +30,7 @@ export function createGroqClient(apiKey: string, modelId: string): InferenceClie
         temperature: request.temperature ?? 0.7,
         max_tokens: request.maxTokens,
         stream: false,
-      });
+      }, { signal: request.signal });
 
       const choice = response.choices[0]!;
       const usage: InferenceResponse["usage"] = {
@@ -68,7 +68,7 @@ export function createGroqClient(apiKey: string, modelId: string): InferenceClie
         max_tokens: request.maxTokens,
         stream: true,
         stream_options: { include_usage: true },
-      });
+      }, { signal: request.signal });
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;

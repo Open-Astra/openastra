@@ -7,7 +7,8 @@ import { getPool } from "../config/postgres.js";
 //
 // Subcommands:
 //   up       — apply all pending migrations (default)
-//   down     — rollback the last N migrations
+//            (there is no `down`: migrations are forward-only — to undo one,
+//             write a new migration; take a backup before upgrading)
 //   status   — show applied vs pending migrations
 //   create   — create a new migration file
 

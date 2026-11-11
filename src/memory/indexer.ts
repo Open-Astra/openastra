@@ -1,3 +1,4 @@
+import { uidFilter } from "./ts-filter.js";
 import { createHash } from "node:crypto";
 import { getTypesense } from "../config/typesense.js";
 import { generateEmbedding, generateEmbeddings } from "./embeddings.js";
@@ -178,7 +179,7 @@ export async function indexProfile(
     await ts
       .collections(COLLECTION)
       .documents()
-      .delete({ filter_by: `uid:=${uid} && source:=profile` });
+      .delete({ filter_by: `${uidFilter(uid)} && source:=profile` });
   } catch {
     // Collection might not have old docs — that's fine
   }

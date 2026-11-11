@@ -132,22 +132,27 @@ export async function snapshotMemory(uid?: string): Promise<SnapshotResult> {
 
   const pool = getPool();
 
-  // Query all three memory tiers (optionally filtered by uid)
-  const uidFilter = uid ? "WHERE uid = $1" : "";
+  // Query all three memory tiers (optionally filtered by user). The user
+  // column differs per table: daily_memory / procedural_memory use user_id
+  // (migration 004), graph_entities uses uid (data migration 001).
   const params = uid ? [uid] : [];
+  const by = (column: string) => (uid ? `WHERE ${column} = $1` : "");
 
   const [dailyResult, graphResult, proceduralResult] = await Promise.all([
-    pool.query(`SELECT * FROM daily_memories ${uidFilter}`, params),
-    pool.query(`SELECT * FROM graph_entities ${uidFilter}`, params),
-    pool.query(`SELECT * FROM procedural_memory ${uidFilter}`, params),
+    pool.query(`SELECT * FROM daily_memory ${by("user_id")}`, params),
+    pool.query(`SELECT * FROM graph_entities ${by("uid")}`, params),
+    pool.query(`SELECT * FROM procedural_memory ${by("user_id")}`, params),
   ]);
 
   const payload: SnapshotPayload = {
     snapshotAt: new Date().toISOString(),
     uid: uid ?? null,
-    dailyMemories: redactRows(dailyResult.rows),
-    graphEntities: redactRows(graphResult.rows),
-    proceduralMemory: redactRows(proceduralResult.rows),
+    // Encrypted snapshots are faithful backups. Redaction is lossy (it mangles
+    // long ids/paths), so it is applied only when the snapshot would otherwise
+    // sit in plaintext.
+    dailyMemories: encryptionKey ? dailyResult.rows : redactRows(dailyResult.rows),
+    graphEntities: encryptionKey ? graphResult.rows : redactRows(graphResult.rows),
+    proceduralMemory: encryptionKey ? proceduralResult.rows : redactRows(proceduralResult.rows),
   };
 
   const jsonData = JSON.stringify(payload);
@@ -236,6 +241,13 @@ async function uploadToS3(
       Key: key,
       Body: data,
       ContentType: "application/octet-stream",
+      // Always encrypt at rest server-side, independent of app-level encryption.
+      // COLD_STORE_S3_SSE=aws:kms (+ COLD_STORE_S3_KMS_KEY_ID) to use a CMK.
+      ServerSideEncryption: process.env.COLD_STORE_S3_SSE || "AES256",
+      ...(process.env.COLD_STORE_S3_KMS_KEY_ID
+        ? { SSEKMSKeyId: process.env.COLD_STORE_S3_KMS_KEY_ID }
+        : {}),
+      ACL: "private",
     }),
   );
 }
@@ -296,8 +308,8 @@ async function uploadToLocal(
   data: Buffer,
 ): Promise<void> {
   const filePath = join(cfg.bucket, key);
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, data);
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  await writeFile(filePath, data, { mode: 0o600 });
 }
 
 async function downloadFromLocal(

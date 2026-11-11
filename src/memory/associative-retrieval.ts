@@ -4,6 +4,12 @@
 import { getPool } from "../config/postgres.js";
 import { createLogger } from "../utils/logger.js";
 
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === "number" ? Math.trunc(value) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 const logger = createLogger("memory-associative-retrieval");
 
 export type AssociationType =
@@ -57,7 +63,7 @@ export async function getAssociations(
   let idx = 3;
   if (options.type) { conditions.push(`association_type = $${idx}`); params.push(options.type); idx++; }
   if (options.minStrength !== undefined) { conditions.push(`strength >= $${idx}`); params.push(options.minStrength); idx++; }
-  const limit = options.limit ?? 100;
+  const limit = clampInt(options.limit, 100, 1, 500);
   params.push(limit);
   const result = await pool.query(
     `SELECT * FROM memory_associations WHERE ${conditions.join(" AND ")} ORDER BY strength DESC LIMIT $${idx}`, params);
@@ -68,9 +74,10 @@ export async function associativeRetrieve(
   workspaceId: string, seedMemoryIds: string[], options: AssociativeRetrieveOptions = {},
 ): Promise<AssociativeRetrievalResult[]> {
   const pool = getPool();
-  const maxHops = options.maxHops ?? 2;
+  // Interpolated into the recursive CTE below — force to bounded integers.
+  const maxHops = clampInt(options.maxHops, 2, 1, 5);
   const minStrength = options.minStrength ?? 0.1;
-  const limit = options.limit ?? 50;
+  const limit = clampInt(options.limit, 50, 1, 500);
   const decayPerHop = 0.8;
   if (seedMemoryIds.length === 0) return [];
   const typeFilter = options.types && options.types.length > 0 ? "AND a.association_type = ANY($4)" : "";

@@ -6,7 +6,7 @@
 // Usage: npx astra tunnel [--port <n>] [--write-env]
 
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { BOLD, RESET, CYAN, GREEN, RED, DIM, info, success, warn } from "../bin/tui.js";
 
@@ -54,7 +54,8 @@ async function writePublicUrl(url: string): Promise<void> {
     lines.push(`PUBLIC_URL=${url}`);
   }
 
-  await writeFile(ENV_FILE, lines.join("\n"), "utf8");
+  await writeFile(ENV_FILE, lines.join("\n"), { encoding: "utf8", mode: 0o600 });
+  await chmod(ENV_FILE, 0o600).catch(() => {});
 }
 
 // ── Check cloudflared is installed ──────────────────────────────────

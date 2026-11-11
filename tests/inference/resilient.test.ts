@@ -4,6 +4,9 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 const { mockCB } = vi.hoisted(() => {
   const cb = {
     execute: vi.fn(),
+    acquire: vi.fn(),
+    recordSuccess: vi.fn(),
+    recordFailure: vi.fn(),
     isOpen: false,
   };
   return { mockCB: cb };
@@ -140,6 +143,7 @@ describe("createResilientClient — chatStream()", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockCB.isOpen = false;
+    mockCB.acquire.mockReset();
     mockCB.execute.mockImplementation((fn: () => Promise<unknown>) => fn());
   });
 
@@ -171,6 +175,9 @@ describe("createResilientClient — chatStream()", () => {
 
   it("falls back to non-streaming response when primary stream fails and circuit is open", async () => {
     mockCB.isOpen = true;
+    mockCB.acquire.mockImplementation(() => {
+      throw new Error("[circuit-breaker] primary is OPEN — fast failing");
+    });
 
     const fallback = makeClient(() => Promise.resolve(makeResponse("fallback content")));
     const primary: InferenceClient = {
@@ -190,5 +197,126 @@ describe("createResilientClient — chatStream()", () => {
     expect(contentDelta).toBeDefined();
     expect(contentDelta?.content).toBe("fallback content");
     expect(doneDelta).toBeDefined();
+  });
+});
+
+describe("createResilientClient — hardening", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockCB.isOpen = false;
+    mockCB.acquire.mockReset();
+    mockCB.execute.mockImplementation((fn: () => Promise<unknown>) => fn());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> {
+    const out: unknown[] = [];
+    for await (const d of stream) out.push(d);
+    return out;
+  }
+
+  it("does not emit a duplicate fallback response after a mid-stream failure", async () => {
+    const fallback = makeClient(() => Promise.resolve(makeResponse("full fallback answer")));
+    const primary: InferenceClient = {
+      chat: vi.fn(),
+      async *chatStream() {
+        yield { type: "content" as const, content: "partial " };
+        throw new Error("503 upstream died");
+      },
+    };
+    const client = createResilientClient({ primary, fallback, maxRetries: 0, baseDelayMs: 0 });
+
+    const seen: unknown[] = [];
+    await expect((async () => {
+      for await (const d of client.chatStream(sampleRequest)) seen.push(d);
+    })()).rejects.toThrow("503 upstream died");
+
+    expect(seen).toEqual([{ type: "content", content: "partial " }]);
+    expect(fallback.chat).not.toHaveBeenCalled();
+    expect(mockCB.recordFailure).toHaveBeenCalledOnce();
+  });
+
+  it("records stream success on the breaker so half-open can close", async () => {
+    const primary: InferenceClient = {
+      chat: vi.fn(),
+      async *chatStream() { yield { type: "content" as const, content: "ok" }; },
+    };
+    const client = createResilientClient({ primary, maxRetries: 0, baseDelayMs: 0 });
+    await collect(client.chatStream(sampleRequest));
+    expect(mockCB.acquire).toHaveBeenCalledOnce();
+    expect(mockCB.recordSuccess).toHaveBeenCalledOnce();
+    expect(mockCB.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("a caller-side stream error (400) does not count as a provider failure", async () => {
+    const primary: InferenceClient = {
+      chat: vi.fn(),
+      async *chatStream() { throw Object.assign(new Error("bad request"), { status: 400 }); },
+    };
+    const client = createResilientClient({ primary, maxRetries: 0, baseDelayMs: 0 });
+    await expect(collect(client.chatStream(sampleRequest))).rejects.toThrow("bad request");
+    expect(mockCB.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("aborts the underlying request when the timeout fires", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const primary: InferenceClient = {
+      chat: vi.fn().mockImplementation((req: InferenceRequest) => {
+        seenSignal = req.signal;
+        return new Promise(() => {}); // never resolves
+      }),
+      async *chatStream() { /* unused */ },
+    };
+    const client = createResilientClient({ primary, maxRetries: 0, baseDelayMs: 0 });
+    const p = client.chat({ ...sampleRequest, timeoutMs: 1000 });
+    const assertion = expect(p).rejects.toThrow(/timeout/i);
+    await vi.advanceTimersByTimeAsync(1001);
+    await assertion;
+    expect(seenSignal?.aborted).toBe(true);
+  });
+
+  it("times out a stalled stream and aborts it", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const primary: InferenceClient = {
+      chat: vi.fn(),
+      chatStream(req: InferenceRequest) {
+        seenSignal = req.signal;
+        return {
+          [Symbol.asyncIterator]() {
+            return { next: () => new Promise<IteratorResult<never>>(() => {}) };
+          },
+        };
+      },
+    };
+    const client = createResilientClient({ primary, maxRetries: 0, baseDelayMs: 0 });
+    const p = collect(client.chatStream({ ...sampleRequest, timeoutMs: 500 }));
+    const assertion = expect(p).rejects.toThrow(/timeout/i);
+    await vi.advanceTimersByTimeAsync(501);
+    await assertion;
+    expect(seenSignal?.aborted).toBe(true);
+    expect(mockCB.recordFailure).toHaveBeenCalledOnce();
+  });
+
+  it("does not send a non-retryable (caller-side) failure to the fallback provider", async () => {
+    const fallback = makeClient(() => Promise.resolve(makeResponse("fallback")));
+    const primary = makeClient(() => Promise.reject(Object.assign(new Error("invalid api key"), { status: 401 })));
+    const client = createResilientClient({ primary, fallback, maxRetries: 0, baseDelayMs: 0 });
+    await expect(client.chat(sampleRequest)).rejects.toThrow("invalid api key");
+    expect(fallback.chat).not.toHaveBeenCalled();
+  });
+
+  it("passes a health predicate to the breaker: 5xx/timeouts count, 4xx do not", async () => {
+    const primary = makeClient(() => Promise.resolve(makeResponse("ok")));
+    const client = createResilientClient({ primary, maxRetries: 0, baseDelayMs: 0 });
+    await client.chat(sampleRequest);
+    const isFailure = mockCB.execute.mock.calls[0]![1] as (e: unknown) => boolean;
+    expect(isFailure(Object.assign(new Error("x"), { status: 503 }))).toBe(true);
+    expect(isFailure(new Error("429 rate limit"))).toBe(true);
+    expect(isFailure(Object.assign(new Error("x"), { status: 400 }))).toBe(false);
+    expect(isFailure(new Error("context length exceeded: max_tokens 5000"))).toBe(false);
   });
 });

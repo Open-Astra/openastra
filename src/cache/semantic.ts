@@ -12,6 +12,22 @@ import { tagCacheEntry } from "./group-tags.js";
 
 const log = createLogger("semantic-cache");
 
+/**
+ * Tenant scope for a cache entry. Cached responses are derived from a user's
+ * private memory/context, so every read and write MUST be scoped to the user
+ * (and workspace) that produced it. A missing uid disables the cache.
+ */
+export interface CacheScope {
+  uid: string;
+  workspaceId?: string | null;
+}
+
+function validScope(scope: CacheScope | undefined): scope is CacheScope {
+  return !!scope && typeof scope.uid === "string" && scope.uid.length > 0;
+}
+
+const SCOPE_SQL = `AND uid = $2 AND workspace_id IS NOT DISTINCT FROM $3`;
+
 export interface CachedResponse {
   content: string;
   agentId: string;
@@ -22,13 +38,16 @@ export interface CachedResponse {
  * Look up a cached response for a query. Returns null on cache miss or error.
  * @param query     - The user's query text
  * @param agentId   - Agent ID to scope the cache
+ * @param scope     - Tenant scope (uid + workspace); required
  * @param threshold - Cosine similarity threshold (default: 0.97)
  */
 export async function getSemanticCache(
   query: string,
   agentId: string,
+  scope: CacheScope,
   threshold = 0.97,
 ): Promise<CachedResponse | null> {
+  if (!validScope(scope)) return null;
   if (!bloomMayHaveEntries(agentId)) return null;
   try {
     const embedding = await generateEmbedding(query);
@@ -44,11 +63,12 @@ export async function getSemanticCache(
       `SELECT content, agent_id, created_at, COALESCE(compressed, false) as compressed
        FROM semantic_cache
        WHERE agent_id = $1
+         ${SCOPE_SQL}
          AND expires_at > NOW()
-         AND 1 - (query_embedding <=> $2::vector) >= $3
-       ORDER BY query_embedding <=> $2::vector
+         AND 1 - (query_embedding <=> $4::vector) >= $5
+       ORDER BY query_embedding <=> $4::vector
        LIMIT 1`,
-      [agentId, vecStr, threshold],
+      [agentId, scope.uid, scope.workspaceId ?? null, vecStr, threshold],
     );
 
     if (result.rows.length === 0) return null;
@@ -79,7 +99,9 @@ export async function getStaleSemanticCache(
   queryText: string,
   agentId: string,
   maxAgeMs: number,
+  scope: CacheScope,
 ): Promise<{ content: string; isStale: boolean } | null> {
+  if (!validScope(scope)) return null;
   try {
     const embedding = await generateEmbedding(queryText);
     const vecStr = `[${embedding.join(",")}]`;
@@ -96,11 +118,12 @@ export async function getStaleSemanticCache(
               COALESCE(compressed, false) as compressed
        FROM semantic_cache
        WHERE agent_id = $1
+         ${SCOPE_SQL}
          AND expires_at > NOW()
-         AND 1 - (query_embedding <=> $2::vector) >= $3
-       ORDER BY query_embedding <=> $2::vector
+         AND 1 - (query_embedding <=> $4::vector) >= $5
+       ORDER BY query_embedding <=> $4::vector
        LIMIT 1`,
-      [agentId, vecStr, threshold],
+      [agentId, scope.uid, scope.workspaceId ?? null, vecStr, threshold],
     );
 
     if (result.rows.length === 0) return null;
@@ -129,7 +152,9 @@ export async function getStaleSemanticCache(
 export async function deleteStaleSemanticCacheEntry(
   queryText: string,
   agentId: string,
+  scope: CacheScope,
 ): Promise<void> {
+  if (!validScope(scope)) return;
   try {
     const embedding = await generateEmbedding(queryText);
     const vecStr = `[${embedding.join(",")}]`;
@@ -139,8 +164,9 @@ export async function deleteStaleSemanticCacheEntry(
     await pool.query(
       `DELETE FROM semantic_cache
        WHERE agent_id = $1
-         AND 1 - (query_embedding <=> $2::vector) >= $3`,
-      [agentId, vecStr, threshold],
+         ${SCOPE_SQL}
+         AND 1 - (query_embedding <=> $4::vector) >= $5`,
+      [agentId, scope.uid, scope.workspaceId ?? null, vecStr, threshold],
     );
   } catch (err) {
     log.dim(`Stale cache delete failed (ignored): ${err instanceof Error ? err.message : String(err)}`);
@@ -202,9 +228,11 @@ export async function setSemanticCache(
   query: string,
   response: string,
   agentId: string,
+  scope: CacheScope,
   ttlMs = 3_600_000,
   tags?: string[],
 ): Promise<void> {
+  if (!validScope(scope)) return;
   try {
     const embedding = await generateEmbedding(query);
     const vecStr = `[${embedding.join(",")}]`;
@@ -218,8 +246,8 @@ export async function setSemanticCache(
     const pool = getPool();
     await pool.query(
       `INSERT INTO semantic_cache
-         (query_text, query_embedding, content, compressed, agent_id, expires_at, tags)
-       VALUES ($1, $2::vector, $3, $4, $5, NOW() + $6::interval, $7::text[])
+         (query_text, query_embedding, content, compressed, agent_id, expires_at, tags, uid, workspace_id)
+       VALUES ($1, $2::vector, $3, $4, $5, NOW() + $6::interval, $7::text[], $8, $9)
        ON CONFLICT DO NOTHING`,
       [
         query,
@@ -229,6 +257,8 @@ export async function setSemanticCache(
         agentId,
         `${ttlMs} milliseconds`,
         tags || [],
+        scope.uid,
+        scope.workspaceId ?? null,
       ],
     );
     bloomMarkAgent(agentId);

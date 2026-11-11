@@ -9,29 +9,51 @@ import { getCircuitBreaker } from "./circuit-breaker.js";
 
 // ── Resilient Inference Client ──────────────────────────────────────
 // Wraps an InferenceClient with retry logic and optional fallback to
-// a secondary provider. Retries transient errors (429, 500, 502, 503)
+// a secondary provider. Retries transient errors (429, 5xx, network)
 // with exponential backoff before falling through to the fallback.
 // A per-provider circuit breaker fast-fails when a provider is down
-// and bypasses retries to go directly to the fallback.
+// and bypasses retries to go directly to the fallback. Only errors that
+// reflect provider health trip the breaker — a caller's 400/401 does not.
 
 interface ResilientOptions {
   primary: InferenceClient;
   fallback?: InferenceClient;
   maxRetries?: number;
   baseDelayMs?: number;
+  /** Circuit-breaker key. Must identify the provider (and endpoint). */
   label?: string;
 }
 
-const RETRYABLE_PATTERNS = [
-  "429", "rate limit",
-  "500", "502", "503", "504",
-  "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT",
-  "fetch failed", "network",
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 529]);
+
+const RETRYABLE_PATTERNS: RegExp[] = [
+  /\b(408|429|500|502|503|504|529)\b/,
+  /rate limit/i,
+  /overloaded/i,
+  /econnreset|econnrefused|etimedout|enotfound|eai_again|epipe/i,
+  /fetch failed/i,
+  /network/i,
+  /socket hang up/i,
 ];
 
-function isRetryable(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
-  return RETRYABLE_PATTERNS.some((p) => msg.includes(p));
+function errorStatus(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const e = err as { status?: unknown; statusCode?: unknown; response?: { status?: unknown } };
+  const candidate = e.status ?? e.statusCode ?? e.response?.status;
+  return typeof candidate === "number" ? candidate : undefined;
+}
+
+/**
+ * True when the error is transient / reflects provider health (rate limit,
+ * 5xx, timeout, network). False for caller-side errors (400, 401, 403, 404,
+ * context-too-long …) which must neither be retried nor trip the breaker.
+ */
+export function isRetryable(err: unknown): boolean {
+  if (err instanceof InferenceTimeoutError) return true;
+  const status = errorStatus(err);
+  if (status !== undefined) return RETRYABLE_STATUS.has(status);
+  const msg = err instanceof Error ? err.message : String(err);
+  return RETRYABLE_PATTERNS.some((p) => p.test(msg));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -40,31 +62,54 @@ function sleep(ms: number): Promise<void> {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+function isCircuitOpenError(err: unknown): boolean {
+  return err instanceof Error &&
+    err.message.includes("circuit-breaker") &&
+    err.message.includes("OPEN");
+}
+
+/** Link an optional caller signal to a controller we own. */
+function linkSignal(parent: AbortSignal | undefined, controller: AbortController): void {
+  if (!parent) return;
+  if (parent.aborted) {
+    controller.abort(parent.reason);
+    return;
+  }
+  parent.addEventListener("abort", () => controller.abort(parent.reason), { once: true });
+}
+
 /**
- * Wrap a chat call with a hard wall-clock timeout.
- * Throws InferenceTimeoutError if the provider does not resolve in time.
+ * Run a chat call with a hard wall-clock timeout. On timeout the underlying
+ * request is aborted (so it stops running and billing) and
+ * InferenceTimeoutError is thrown.
  */
-function withTimeout(
-  call: Promise<InferenceResponse>,
+async function chatWithTimeout(
+  client: InferenceClient,
+  request: InferenceRequest,
   providerLabel: string,
   timeoutMs: number,
 ): Promise<InferenceResponse> {
-  return new Promise<InferenceResponse>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new InferenceTimeoutError(providerLabel, timeoutMs));
-    }, timeoutMs);
+  const controller = new AbortController();
+  linkSignal(request.signal, controller);
 
-    call.then(
-      (result) => {
-        clearTimeout(timer);
-        resolve(result);
-      },
-      (err: unknown) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new InferenceTimeoutError(providerLabel, timeoutMs);
+      controller.abort(err);
+      reject(err);
+    }, timeoutMs);
   });
+
+  const call = client.chat({ ...request, signal: controller.signal });
+  // If the timeout wins, the aborted call rejects later — swallow that.
+  call.catch(() => {});
+
+  try {
+    return await Promise.race([call, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function createResilientClient(options: ResilientOptions): InferenceClient {
@@ -81,7 +126,7 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await withTimeout(client.chat(request), retryLabel, timeoutMs);
+        return await chatWithTimeout(client, request, retryLabel, timeoutMs);
       } catch (err) {
         lastError = err;
         const retryable = isRetryable(err);
@@ -92,6 +137,7 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
         );
 
         if (!retryable || attempt === maxRetries) break;
+        if (request.signal?.aborted) break;
 
         const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
         await sleep(delay);
@@ -102,7 +148,51 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
   }
 
   async function chatPrimaryWithBreaker(request: InferenceRequest): Promise<InferenceResponse> {
-    return cb.execute(() => chatWithRetry(primary, request, label));
+    return cb.execute(() => chatWithRetry(primary, request, label), isRetryable);
+  }
+
+  /**
+   * Iterate a provider stream with an idle timeout: if no delta arrives within
+   * timeoutMs (first token or between tokens) the request is aborted.
+   */
+  async function* streamWithIdleTimeout(
+    request: InferenceRequest,
+  ): AsyncGenerator<InferenceStreamDelta> {
+    const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const controller = new AbortController();
+    linkSignal(request.signal, controller);
+
+    const iterator = primary
+      .chatStream({ ...request, signal: controller.signal })[Symbol.asyncIterator]();
+
+    try {
+      while (true) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const err = new InferenceTimeoutError(label, timeoutMs);
+            controller.abort(err);
+            reject(err);
+          }, timeoutMs);
+        });
+
+        const next = iterator.next();
+        next.catch(() => {});
+        let result: IteratorResult<InferenceStreamDelta>;
+        try {
+          result = await Promise.race([next, timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+
+        if (result.done) return;
+        yield result.value;
+      }
+    } finally {
+      // Consumer stopped early or we errored — release the provider stream.
+      if (!controller.signal.aborted) controller.abort();
+      void iterator.return?.().catch(() => {});
+    }
   }
 
   return {
@@ -110,14 +200,14 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
       try {
         return await chatPrimaryWithBreaker(request);
       } catch (primaryErr) {
-        // If circuit is open (fast-fail) or retries exhausted, go to fallback
         if (!fallback) throw primaryErr;
 
-        const isCircuitOpen = primaryErr instanceof Error &&
-          primaryErr.message.includes("circuit-breaker") &&
-          primaryErr.message.includes("OPEN");
+        const circuitOpen = isCircuitOpenError(primaryErr);
+        // Caller-side errors (bad request, auth, too long) would fail on the
+        // fallback as well, and must not leak the prompt to another provider.
+        if (!circuitOpen && !isRetryable(primaryErr)) throw primaryErr;
 
-        if (isCircuitOpen) {
+        if (circuitOpen) {
           console.warn(`[resilient] Circuit open for "${label}", skipping retries → fallback`);
         } else {
           console.warn("[resilient] Primary exhausted, falling back to secondary provider");
@@ -127,7 +217,10 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
           return await chatWithRetry(fallback, request, "fallback");
         } catch (fallbackErr) {
           // Both failed — throw the primary error (more relevant)
-          console.error("[resilient] Fallback also failed:", fallbackErr);
+          console.error(
+            "[resilient] Fallback also failed:",
+            fallbackErr instanceof Error ? fallbackErr.message : fallbackErr,
+          );
           throw primaryErr;
         }
       }
@@ -136,24 +229,45 @@ export function createResilientClient(options: ResilientOptions): InferenceClien
     async *chatStream(
       request: InferenceRequest,
     ): AsyncIterable<InferenceStreamDelta> {
-      // Streaming uses primary only (no mid-stream failover).
-      // If primary fails (or circuit is open), fall back for a non-streaming response.
-      try {
-        if (cb.isOpen) {
-          throw new Error(`[circuit-breaker] ${label} is OPEN — fast failing`);
-        }
-        yield* primary.chatStream(request);
-      } catch (err) {
-        if (!fallback) throw err;
+      // Streaming uses primary only. A fallback (non-streaming) response is
+      // used only when the primary failed BEFORE emitting anything — once
+      // deltas have reached the caller, emitting a second full response
+      // would duplicate output, so the error is surfaced instead.
+      let emitted = false;
+      const start = Date.now();
+      let acquired = false;
+      let settled = false;
 
-        console.warn("[resilient] Stream failed, falling back to non-streaming");
+      try {
+        cb.acquire(); // throws when OPEN; moves OPEN → HALF-OPEN after cool-down
+        acquired = true;
+
+        for await (const delta of streamWithIdleTimeout(request)) {
+          emitted = true;
+          yield delta;
+        }
+        settled = true;
+        cb.recordSuccess(Date.now() - start);
+      } catch (err) {
+        if (acquired && !settled) {
+          settled = true;
+          if (isRetryable(err)) cb.recordFailure(Date.now() - start);
+          else cb.recordSuccess(Date.now() - start);
+        }
+
+        if (!fallback || emitted) throw err;
+        if (!isCircuitOpenError(err) && !isRetryable(err)) throw err;
+
+        console.warn("[resilient] Stream failed before first token, falling back to non-streaming");
         const response = await chatWithRetry(fallback, request, "fallback-stream");
 
-        // Emit the full response as a single content delta + done
         if (response.content) {
           yield { type: "content", content: response.content };
         }
         yield { type: "done", usage: response.usage };
+      } finally {
+        // Consumer abandoned the stream mid-way: the provider was healthy.
+        if (acquired && !settled) cb.recordSuccess(Date.now() - start);
       }
     },
   };

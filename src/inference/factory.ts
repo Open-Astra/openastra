@@ -14,6 +14,13 @@ import { createResilientClient } from "./resilient.js";
 import { warmPool } from "./warm-pool.js";
 import { withSemanticCache } from "./semantic-cache-layer.js";
 import { predictTokenUsage } from "./token-budget-predictor.js";
+import {
+  assertKeyedEndpointAllowed,
+  assertValidEndpointUrl,
+  breakerLabel,
+  guardUntrustedEndpoint,
+  isTrustedInferenceEndpoint,
+} from "./endpoint-policy.js";
 
 // ── Provider Auth Aliases ──────────────────────────────────────────
 // Maps provider variant names to the canonical env-var provider key
@@ -65,24 +72,81 @@ function resolveApiKey(
 // Wraps every client in the resilient layer (retry + failover).
 // Caches clients keyed by provider:modelId:endpoint to avoid duplicates.
 
-let _fallbackClient: InferenceClient | null = null;
+// ── Fallback provider ───────────────────────────────────────────────
+// Off unless the operator sets INFERENCE_FALLBACK="provider:modelId".
+// Agents on local providers (ollama / vllm / edge) never fall back to a
+// cloud provider — that would silently ship prompts the operator chose to
+// keep on-prem — unless INFERENCE_FALLBACK_ALLOW_LOCAL_TO_CLOUD=true.
 
-function getFallbackClient(): InferenceClient | undefined {
-  if (_fallbackClient) return _fallbackClient;
+const LOCAL_PROVIDERS = new Set(["ollama", "vllm", "edge"]);
 
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (!openaiKey) return undefined;
+let _fallback: { spec: string; provider: string; client: InferenceClient } | null = null;
 
-  _fallbackClient = createOpenAIClient(openaiKey, "gpt-4o-mini");
-  return _fallbackClient;
+function getFallbackClient(forProvider: string): InferenceClient | undefined {
+  const spec = process.env.INFERENCE_FALLBACK?.trim();
+  if (!spec) return undefined;
+
+  const sep = spec.indexOf(":");
+  if (sep <= 0 || sep === spec.length - 1) {
+    console.warn(`[factory] Ignoring INFERENCE_FALLBACK="${spec}" — expected "provider:modelId"`);
+    return undefined;
+  }
+  const provider = spec.slice(0, sep);
+  const modelId = spec.slice(sep + 1);
+
+  if (provider === forProvider) return undefined;
+  if (
+    LOCAL_PROVIDERS.has(forProvider) &&
+    !LOCAL_PROVIDERS.has(provider) &&
+    process.env.INFERENCE_FALLBACK_ALLOW_LOCAL_TO_CLOUD !== "true"
+  ) {
+    return undefined;
+  }
+
+  if (_fallback && _fallback.spec === spec) return _fallback.client;
+
+  try {
+    const client = createPrimaryClient({
+      provider,
+      modelId,
+      maxContextTokens: 128_000,
+      maxOutputTokens: 4096,
+      temperature: 0.7,
+    } as AgentConfig["model"]);
+    _fallback = { spec, provider, client };
+    return client;
+  } catch (err) {
+    console.warn(
+      `[factory] INFERENCE_FALLBACK="${spec}" unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
+  }
 }
+
+/**
+ * Keyless providers accept arbitrary endpoints; untrusted ones are SSRF-checked
+ * before every call.
+ */
+function guardKeyless(
+  client: InferenceClient,
+  provider: string,
+  endpoint: string | undefined,
+): InferenceClient {
+  if (!endpoint || isTrustedInferenceEndpoint(endpoint)) return client;
+  assertValidEndpointUrl(provider, endpoint);
+  return guardUntrustedEndpoint(client, provider, endpoint);
+}
+
+const GROK_DEFAULT_ENDPOINT = "https://api.x.ai/v1";
 
 function createPrimaryClient(modelConfig: AgentConfig["model"]): InferenceClient {
   switch (modelConfig.provider) {
     case "grok": {
       const apiKey = process.env.GROK_API_KEY;
       if (!apiKey) throw new Error("GROK_API_KEY required for grok provider");
-      return createGrokClient(apiKey, modelConfig.endpoint ?? "https://api.x.ai/v1", modelConfig.modelId);
+      // The platform key is only ever sent to x.ai or an operator-trusted endpoint.
+      assertKeyedEndpointAllowed("grok", modelConfig.endpoint, GROK_DEFAULT_ENDPOINT);
+      return createGrokClient(apiKey, modelConfig.endpoint ?? GROK_DEFAULT_ENDPOINT, modelConfig.modelId);
     }
     case "groq": {
       const apiKey = process.env.GROQ_API_KEY;
@@ -105,13 +169,23 @@ function createPrimaryClient(modelConfig: AgentConfig["model"]): InferenceClient
       return createClaudeClient(apiKey, modelConfig.modelId);
     }
     case "vllm": {
-      const apiKey = process.env.VLLM_API_KEY || "no-key";
       if (!modelConfig.endpoint) throw new Error("endpoint required for vllm provider");
-      return createGrokClient(apiKey, modelConfig.endpoint, modelConfig.modelId);
+      // VLLM_API_KEY is only attached for operator-trusted endpoints.
+      const trusted = isTrustedInferenceEndpoint(modelConfig.endpoint);
+      const apiKey = (trusted && process.env.VLLM_API_KEY) || "no-key";
+      return guardKeyless(
+        createGrokClient(apiKey, modelConfig.endpoint, modelConfig.modelId),
+        "vllm",
+        modelConfig.endpoint,
+      );
     }
     case "ollama": {
       const endpoint = modelConfig.endpoint ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-      return createOllamaClient(modelConfig.modelId, endpoint, modelConfig.maxContextTokens);
+      return guardKeyless(
+        createOllamaClient(modelConfig.modelId, endpoint, modelConfig.maxContextTokens),
+        "ollama",
+        modelConfig.endpoint,
+      );
     }
     case "openrouter": {
       const apiKey = resolveApiKey("openrouter", "OPENROUTER_API_KEY");
@@ -134,7 +208,7 @@ function createPrimaryClient(modelConfig: AgentConfig["model"]): InferenceClient
     }
     case "edge": {
       const edgeUrl = modelConfig.endpoint ?? process.env.EDGE_INFERENCE_URL ?? "http://localhost:8000";
-      return createEdgeClient(modelConfig.modelId, edgeUrl);
+      return guardKeyless(createEdgeClient(modelConfig.modelId, edgeUrl), "edge", modelConfig.endpoint);
     }
     default:
       throw new Error(`Unknown inference provider: ${modelConfig.provider}`);
@@ -148,9 +222,10 @@ export function createInferenceClient(
   const primary = createPrimaryClient(modelConfig);
   return createResilientClient({
     primary,
-    fallback: getFallbackClient(),
+    fallback: getFallbackClient(modelConfig.provider),
     maxRetries: 2,
     baseDelayMs: 1000,
+    label: breakerLabel(modelConfig.provider, modelConfig.endpoint),
   });
 }
 
@@ -160,33 +235,48 @@ export function createInferenceClient(
 
 const _clientMap = new Map<string, InferenceClient>();
 
-function clientKey(config: AgentConfig["model"]): string {
-  return `${config.provider}:${config.modelId}:${config.endpoint ?? "default"}`;
+const MAX_CACHED_CLIENTS = 256;
+
+function clientKey(config: AgentConfig): string {
+  const base = `${config.model.provider}:${config.model.modelId}:${config.model.endpoint ?? "default"}`;
+  // The token-prediction wrapper closes over the agent config, so clients
+  // carrying it must not be shared between agents.
+  return process.env.TOKEN_PREDICTION_ENABLED === "true" ? `${base}:${config.id}` : base;
+}
+
+function cacheClient(key: string, client: InferenceClient): void {
+  if (_clientMap.size >= MAX_CACHED_CLIENTS) {
+    const oldest = _clientMap.keys().next().value;
+    if (oldest !== undefined) _clientMap.delete(oldest);
+  }
+  _clientMap.set(key, client);
 }
 
 export function getInferenceClientForAgent(config: AgentConfig): InferenceClient {
-  const key = clientKey(config.model);
+  const key = clientKey(config);
   const cached = _clientMap.get(key);
   if (cached) return cached;
 
   // Check warm pool before creating new client
   const warmed = warmPool.get(config.model.provider, config.model.modelId);
-  if (warmed) {
-    _clientMap.set(key, warmed);
+  if (warmed && !config.model.endpoint) {
+    cacheClient(key, warmed);
     return warmed;
   }
 
   const primary = createPrimaryClient(config.model);
   let client: InferenceClient = createResilientClient({
     primary,
-    fallback: getFallbackClient(),
+    fallback: getFallbackClient(config.model.provider),
     maxRetries: 2,
     baseDelayMs: 1000,
+    label: breakerLabel(config.model.provider, config.model.endpoint),
   });
 
-  // Wrap with semantic cache if enabled
+  // Wrap with semantic cache if enabled. The layer is scoped per request
+  // (request.cacheScope: agent + uid + workspace) — never per client.
   if (process.env.SEMANTIC_CACHE_ENABLED === "true") {
-    client = withSemanticCache(client, config.id);
+    client = withSemanticCache(client);
   }
 
   // Wrap with token prediction if enabled (feature 6)
@@ -194,7 +284,7 @@ export function getInferenceClientForAgent(config: AgentConfig): InferenceClient
     client = withTokenPrediction(client, config);
   }
 
-  _clientMap.set(key, client);
+  cacheClient(key, client);
   return client;
 }
 

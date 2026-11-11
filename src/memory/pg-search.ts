@@ -27,8 +27,9 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_uid ON memory_chunks(uid);
-CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding ON memory_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 `;
+// The table and its vector index are created by migration 200. The DDL above
+// is only a fallback for databases that have not run migrations yet.
 
 let tableReady = false;
 
@@ -38,9 +39,10 @@ async function ensureTable(): Promise<void> {
     await getPool().query(ENSURE_TABLE);
     tableReady = true;
   } catch (err) {
-    // ivfflat index may fail if not enough rows; that's OK
-    log.dim("pg-search table init (index may need data):", err instanceof Error ? err.message : "");
-    tableReady = true;
+    // Do NOT mark the table ready: every later call must retry (and fail
+    // loudly) rather than run queries against a table that does not exist.
+    log.error("pg-search table init failed:", err instanceof Error ? err.message : String(err));
+    throw err;
   }
 }
 

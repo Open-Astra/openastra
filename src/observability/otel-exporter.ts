@@ -1,3 +1,4 @@
+import { isBlockedUrl } from "../utils/ssrf-guard.js";
 import { getPool } from "../config/postgres.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -136,6 +137,19 @@ export async function exportSpansToOtlp(
     ...config.headers,
   };
 
+  // The endpoint is workspace-supplied: refuse internal / metadata targets on
+  // every export (not only when the config is saved — DNS can change).
+  let blocked = true;
+  try {
+    blocked = await isBlockedUrl(config.endpoint);
+  } catch {
+    blocked = true; // fail closed
+  }
+  if (blocked) {
+    log.error(`OTLP export blocked: endpoint for workspace ${workspaceId} is not an allowed public URL`);
+    return { exported: 0, endpoint: config.endpoint, durationMs: Date.now() - startedAt };
+  }
+
   // POST to OTLP endpoint
   try {
     const controller = new AbortController();
@@ -146,12 +160,12 @@ export async function exportSpansToOtlp(
       headers: requestHeaders,
       body: JSON.stringify(otlpPayload),
       signal: controller.signal,
+      redirect: "error", // a redirect could bounce the request to an internal host
     });
     clearTimeout(timeout);
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      log.error(`OTLP export failed: HTTP ${response.status} — ${body}`);
+      log.error(`OTLP export failed: HTTP ${response.status}`);
       return {
         exported: 0,
         endpoint: config.endpoint,

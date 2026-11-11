@@ -1,3 +1,4 @@
+import { uidFilter } from "./ts-filter.js";
 import { getTypesense } from "../config/typesense.js";
 import { generateEmbedding } from "./embeddings.js";
 import type { MemorySearchResult } from "./types.js";
@@ -33,7 +34,7 @@ export async function searchMemory(
           collection: COLLECTION,
           q: query,
           query_by: "content",
-          filter_by: `uid:=${uid}`,
+          filter_by: uidFilter(uid),
           sort_by: "_text_match:desc,_vector_distance:asc",
           vector_query: `embedding:([${queryEmbedding.join(",")}], k:${topK * 2})`,
           per_page: topK,

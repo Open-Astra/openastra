@@ -1,4 +1,6 @@
 import pg from "pg";
+import { readFileSync } from "node:fs";
+import type { ConnectionOptions } from "node:tls";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("postgres");
@@ -37,6 +39,39 @@ export function loadPostgresConfig(): PostgresConfig {
   };
 }
 
+/**
+ * TLS options for TCP connections, from env:
+ *   PG_SSL / PG_SSLMODE   disable | require | verify-ca | verify-full
+ *                         (PG_SSL=true ≡ verify-full, PG_SSL=false ≡ disable)
+ *   PG_SSL_CA             path to a CA bundle (PEM)
+ *   PG_SSL_CERT / PG_SSL_KEY   client certificate + key paths (mTLS)
+ *   PG_SSL_REJECT_UNAUTHORIZED=false   legacy escape hatch (≡ require)
+ * "require" encrypts without verifying the server certificate; prefer
+ * verify-full with PG_SSL_CA for managed databases.
+ */
+export function loadPostgresTls(env: NodeJS.ProcessEnv = process.env): ConnectionOptions | false | undefined {
+  const raw = (env.PG_SSLMODE ?? env.PG_SSL ?? "").trim().toLowerCase();
+  if (!raw) return undefined; // driver default (no TLS) — local dev / unix socket
+  if (raw === "disable" || raw === "false" || raw === "0" || raw === "off") return false;
+
+  const mode = raw === "true" || raw === "1" || raw === "on" ? "verify-full" : raw;
+  if (!["require", "verify-ca", "verify-full"].includes(mode)) {
+    throw new Error(`Invalid PG_SSL/PG_SSLMODE "${raw}" (use disable, require, verify-ca or verify-full)`);
+  }
+
+  const tls: ConnectionOptions = {
+    rejectUnauthorized: mode !== "require" && env.PG_SSL_REJECT_UNAUTHORIZED !== "false",
+  };
+  if (mode === "verify-ca") {
+    // Verify the chain but not the hostname.
+    tls.checkServerIdentity = () => undefined;
+  }
+  if (env.PG_SSL_CA) tls.ca = readFileSync(env.PG_SSL_CA, "utf8");
+  if (env.PG_SSL_CERT) tls.cert = readFileSync(env.PG_SSL_CERT, "utf8");
+  if (env.PG_SSL_KEY) tls.key = readFileSync(env.PG_SSL_KEY, "utf8");
+  return tls;
+}
+
 export function initPostgres(config?: PostgresConfig): pg.Pool {
   if (pool) return pool;
 
@@ -59,6 +94,8 @@ export function initPostgres(config?: PostgresConfig): pg.Pool {
     // Direct TCP (local dev / Cloud SQL Proxy)
     poolConfig.host = cfg.host;
     poolConfig.port = cfg.port;
+    const tls = loadPostgresTls();
+    if (tls !== undefined) poolConfig.ssl = tls;
   }
 
   pool = new pg.Pool(poolConfig);

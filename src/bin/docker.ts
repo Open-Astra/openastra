@@ -98,12 +98,16 @@ export async function startServices(config: AstraCliConfig): Promise<void> {
       "--name", PG_CONTAINER,
       "-v", `${PG_VOLUME}:/var/lib/postgresql/data`,
       "-e", `POSTGRES_USER=astra`,
-      "-e", `POSTGRES_PASSWORD=${config.pgPassword}`,
+      // Name only: the value is taken from this process's environment, so the
+      // password never appears in the docker command line (`ps`, shell history).
+      "-e", "POSTGRES_PASSWORD",
       "-e", `POSTGRES_DB=astra`,
-      "-p", `${config.pgPort}:5432`,
+      // Loopback only — a bare "port:port" publishes on every interface and
+      // bypasses host firewalls such as ufw.
+      "-p", `127.0.0.1:${config.pgPort}:5432`,
       "--restart", "unless-stopped",
       PG_IMAGE,
-    ]);
+    ], { env: { ...process.env, POSTGRES_PASSWORD: config.pgPassword } });
   } else if (status.postgres === "stopped") {
     await execFile("docker", ["start", PG_CONTAINER]);
   }
@@ -115,12 +119,12 @@ export async function startServices(config: AstraCliConfig): Promise<void> {
       "run", "-d",
       "--name", TS_CONTAINER,
       "-v", `${TS_VOLUME}:/data`,
-      "-e", `TYPESENSE_API_KEY=${config.typesenseApiKey}`,
+      "-e", "TYPESENSE_API_KEY",
       "-e", "TYPESENSE_DATA_DIR=/data",
-      "-p", `${config.typesensePort}:8108`,
+      "-p", `127.0.0.1:${config.typesensePort}:8108`,
       "--restart", "unless-stopped",
       TS_IMAGE,
-    ]);
+    ], { env: { ...process.env, TYPESENSE_API_KEY: config.typesenseApiKey } });
   } else if (status.typesense === "stopped") {
     await execFile("docker", ["start", TS_CONTAINER]);
   }

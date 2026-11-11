@@ -2,7 +2,7 @@
 // Stores Astra CLI configuration at ~/.astra/config.json.
 // Generated secrets persist across runs so Docker volumes stay valid.
 
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm, chmod } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -66,8 +66,12 @@ export async function loadConfig(): Promise<AstraCliConfig> {
 }
 
 export async function saveConfig(config: AstraCliConfig): Promise<void> {
-  await mkdir(ASTRA_HOME, { recursive: true });
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8");
+  // The config holds the JWT secret, internal API key and DB password:
+  // owner-only directory and file. chmod covers files created by older versions.
+  await mkdir(ASTRA_HOME, { recursive: true, mode: 0o700 });
+  await chmod(ASTRA_HOME, 0o700).catch(() => {});
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
+  await chmod(CONFIG_PATH, 0o600).catch(() => {});
 }
 
 export async function deleteConfig(): Promise<void> {

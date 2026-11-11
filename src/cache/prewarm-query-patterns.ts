@@ -1,5 +1,4 @@
 import { getPool } from "../config/postgres.js";
-import { getSemanticCache, setSemanticCache } from "./semantic.js";
 import { generateEmbedding } from "../memory/embeddings.js";
 import { createLogger } from "../utils/logger.js";
 
@@ -36,22 +35,9 @@ export async function prewarmFromPatterns(agentId?: string): Promise<void> {
     let preheated = 0;
     for (const row of result.rows) {
       try {
-        // Check if entry is already in process cache
-        const cached = await getSemanticCache(row.query_text, row.agent_id);
-        if (cached) {
-          preheated++;
-          continue;
-        }
-
-        // Entry not in cache — compute embedding and store it for fast path
+        // Warm the embedding cache only. Never write synthetic responses into
+        // the semantic cache — a placeholder would be served as a real answer.
         await generateEmbedding(row.query_text);
-
-        // Create a minimal placeholder response to satisfy setSemanticCache contract
-        // In production, you'd fetch the actual cached response from the DB
-        // For now, we just ensure the embedding is generated and cached
-        const placeholderResponse = `[cached-pattern] ${row.query_text}`;
-        await setSemanticCache(row.query_text, placeholderResponse, row.agent_id, 60 * 60 * 1000); // 1 hour TTL
-
         preheated++;
       } catch (err) {
         log.dim(

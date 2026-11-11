@@ -24,7 +24,10 @@ export function createGrokClient(apiKey: string, baseURL: string, modelId: strin
         temperature: request.temperature ?? 0.7,
         max_tokens: request.maxTokens,
         stream: false,
-      }, request.sessionId ? { headers: { "x-grok-conv-id": request.sessionId } } : undefined);
+      }, {
+        signal: request.signal,
+        ...(request.sessionId ? { headers: { "x-grok-conv-id": request.sessionId } } : {}),
+      });
 
       const choice = response.choices[0]!;
       const cached =
@@ -68,7 +71,10 @@ export function createGrokClient(apiKey: string, baseURL: string, modelId: strin
         max_tokens: request.maxTokens,
         stream: true,
         stream_options: { include_usage: true },
-      }, request.sessionId ? { headers: { "x-grok-conv-id": request.sessionId } } : undefined);
+      }, {
+        signal: request.signal,
+        ...(request.sessionId ? { headers: { "x-grok-conv-id": request.sessionId } } : {}),
+      });
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;

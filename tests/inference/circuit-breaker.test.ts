@@ -220,3 +220,39 @@ describe("CircuitBreaker", () => {
     expect(statusMap["registry-provider-2"]).toBeDefined();
   });
 });
+
+describe("CircuitBreaker — provider-health predicate", () => {
+  it("caller-side errors do not open the circuit", async () => {
+    const cb = makeCB({ failureThreshold: 3 });
+    const badRequest = vi.fn().mockRejectedValue(Object.assign(new Error("400 bad request"), { status: 400 }));
+    for (let i = 0; i < 10; i++) {
+      await expect(cb.execute(badRequest, () => false)).rejects.toThrow("400");
+    }
+    expect(cb.status).toBe("closed");
+  });
+
+  it("provider-health errors still open it", async () => {
+    const cb = makeCB({ failureThreshold: 3 });
+    const down = vi.fn().mockRejectedValue(new Error("503"));
+    for (let i = 0; i < 3; i++) {
+      await expect(cb.execute(down, () => true)).rejects.toThrow("503");
+    }
+    expect(cb.status).toBe("open");
+  });
+
+  it("acquire/recordSuccess lets a stream move OPEN → HALF-OPEN → CLOSED", async () => {
+    const cb = makeCB({ failureThreshold: 1, successThreshold: 2, timeoutMs: 1000 });
+    cb.acquire();
+    cb.recordFailure(5);
+    expect(cb.status).toBe("open");
+    expect(() => cb.acquire()).toThrow(/OPEN/);
+
+    vi.advanceTimersByTime(1001);
+    cb.acquire();
+    expect(cb.status).toBe("half-open");
+    cb.recordSuccess(5);
+    cb.acquire();
+    cb.recordSuccess(5);
+    expect(cb.status).toBe("closed");
+  });
+});

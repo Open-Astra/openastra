@@ -214,7 +214,7 @@ export function createClaudeClient(
         tools: tools as Anthropic.Messages.Tool[] | undefined,
         temperature: request.temperature ?? 0.7,
         max_tokens: request.maxTokens ?? 4096,
-      });
+      }, { signal: request.signal });
 
       // Extract text content
       const textBlocks = response.content.filter(
@@ -267,7 +267,7 @@ export function createClaudeClient(
         tools: tools as Anthropic.Messages.Tool[] | undefined,
         temperature: request.temperature ?? 0.7,
         max_tokens: request.maxTokens ?? 4096,
-      });
+      }, { signal: request.signal });
 
       // Track tool call indices by block index
       let toolBlockIndex = 0;

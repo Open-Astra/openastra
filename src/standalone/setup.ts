@@ -12,7 +12,8 @@
 // TUI that walks you through every configuration option.
 
 import { createInterface } from "node:readline";
-import { writeFile, access } from "node:fs/promises";
+import { writeFile, access, chmod } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 // ── ANSI Helpers ───────────────────────────────────────────────────
@@ -299,7 +300,7 @@ async function main(): Promise<void> {
     `PG_PASSWORD=${config.pgPassword}`,
     "",
     "# Typesense",
-    "TYPESENSE_API_KEY=astra-typesense-key",
+    `TYPESENSE_API_KEY=${randomBytes(24).toString("hex")}`,
     "TYPESENSE_HOST=typesense",
     "TYPESENSE_PORT=8108",
     "",
@@ -329,7 +330,9 @@ async function main(): Promise<void> {
   }
 
   if (writeEnv) {
-    await writeFile(envPath, envLines.join("\n") + "\n");
+    // .env holds every secret — owner read/write only.
+    await writeFile(envPath, envLines.join("\n") + "\n", { mode: 0o600 });
+    await chmod(envPath, 0o600).catch(() => {});
     success("Generated .env");
   } else {
     warn("Skipped .env (already exists)");

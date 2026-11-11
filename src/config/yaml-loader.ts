@@ -15,6 +15,7 @@ import { registerAgentConfig } from "./agents.js";
 import { setDefaultAgentId } from "../channels/router.js";
 import { createLogger } from "../utils/logger.js";
 import { applyTransforms } from "./yaml-transforms.js";
+import { trustInferenceEndpoint } from "../inference/endpoint-policy.js";
 
 const log = createLogger("yaml");
 
@@ -401,6 +402,8 @@ export function seedAgentsFromConfig(
   if (!config.agents) return agents;
 
   for (const [id, def] of Object.entries(config.agents)) {
+    // Endpoints written in astra.yml are operator-chosen and therefore trusted.
+    trustInferenceEndpoint(def.model?.endpoint);
     const agentConfig: AgentConfig = {
       id,
       displayName: def.displayName ?? id,

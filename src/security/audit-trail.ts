@@ -352,7 +352,7 @@ export class AuditTrailManager {
     if (options.format === "jsonl") {
       return rows.map((r: Record<string, unknown>) => {
         const entry = this.rowToEntry(r);
-        if (!options.includeEvidence) delete (entry as Record<string, unknown>).evidence;
+        if (!options.includeEvidence) delete (entry as unknown as Record<string, unknown>).evidence;
         return JSON.stringify(entry);
       }).join("\n");
     }

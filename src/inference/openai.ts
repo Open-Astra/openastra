@@ -24,7 +24,7 @@ export function createOpenAIClient(
         temperature: request.temperature ?? 0.7,
         max_tokens: request.maxTokens,
         stream: false,
-      });
+      }, { signal: request.signal });
 
       const choice = response.choices[0]!;
       const cached =
@@ -72,7 +72,7 @@ export function createOpenAIClient(
         max_tokens: request.maxTokens,
         stream: true,
         stream_options: { include_usage: true },
-      });
+      }, { signal: request.signal });
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;

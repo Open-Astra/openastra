@@ -178,3 +178,48 @@ describe("factory: getInferenceClientForAgent", () => {
     expect(client).toBe(mockResilientClient);
   });
 });
+
+describe("factory: endpoint and fallback policy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.INFERENCE_FALLBACK;
+    delete process.env.INFERENCE_ENDPOINT_ALLOWLIST;
+    delete process.env.TOKEN_PREDICTION_ENABLED;
+    mockWarmPool.get.mockReturnValue(null);
+  });
+
+  it("refuses to send the Grok key to a caller-supplied endpoint", () => {
+    process.env.GROK_API_KEY = "xai-test-key";
+    expect(() => createInferenceClient(makeAgentConfig("grok", "grok-3", "https://attacker.tld/v1").model))
+      .toThrow(/not allowed for provider "grok"/);
+    expect(() => getInferenceClientForAgent(makeAgentConfig("grok", "grok-x1", "https://attacker.tld/v1")))
+      .toThrow(/not allowed/);
+  });
+
+  it("accepts a Grok endpoint the operator allowlisted", () => {
+    process.env.GROK_API_KEY = "xai-test-key";
+    process.env.INFERENCE_ENDPOINT_ALLOWLIST = "https://proxy.corp.example";
+    expect(() => createInferenceClient(makeAgentConfig("grok", "grok-3", "https://proxy.corp.example/v1").model))
+      .not.toThrow();
+  });
+
+  it("has no fallback provider unless INFERENCE_FALLBACK is set, and labels the breaker per provider", () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    createInferenceClient(makeAgentConfig("claude", "claude-x").model);
+    const opts = vi.mocked(createResilientClient).mock.calls[0]![0];
+    expect(opts.fallback).toBeUndefined();
+    expect(opts.label).toBe("claude");
+  });
+
+  it("never falls back from a local provider to a cloud provider by default", () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.INFERENCE_FALLBACK = "openai:gpt-4o-mini";
+    createInferenceClient(makeAgentConfig("ollama", "llama3").model);
+    expect(vi.mocked(createResilientClient).mock.calls[0]![0].fallback).toBeUndefined();
+
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    createInferenceClient(makeAgentConfig("claude", "claude-y").model);
+    expect(vi.mocked(createResilientClient).mock.calls[1]![0].fallback).toBeDefined();
+  });
+});

@@ -26,7 +26,39 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // GitHub personal / OAuth / server / refresh tokens
   { name: "github-token", regex: /\bgh[psohr]_[A-Za-z0-9]{36,}\b/g },
   // Stripe live / test secret keys
-  { name: "stripe-key", regex: /\bsk_(live|test)_[A-Za-z0-9]{24,}\b/g },
+  { name: "stripe-key", regex: /\b[sr]k_(live|test)_[A-Za-z0-9]{24,}\b/g },
+  // AWS temporary access key IDs
+  { name: "aws-temp-key", regex: /\bASIA[0-9A-Z]{16}\b/g },
+  // Anthropic API keys
+  { name: "anthropic-key", regex: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+  // OpenAI / OpenRouter / generic "sk-" API keys (incl. sk-proj-…)
+  { name: "openai-key", regex: /\bsk-(?:proj-|or-v1-)?[A-Za-z0-9_-]{20,}/g },
+  // xAI and Groq API keys
+  { name: "xai-key", regex: /\bxai-[A-Za-z0-9]{20,}\b/g },
+  { name: "groq-key", regex: /\bgsk_[A-Za-z0-9]{20,}\b/g },
+  // Google API keys
+  { name: "google-api-key", regex: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  // Slack tokens and webhook URLs
+  { name: "slack-token", regex: /\bxox[abeprs]-[A-Za-z0-9-]{10,}/g },
+  { name: "slack-webhook", regex: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/g },
+  // Notion integration tokens
+  { name: "notion-token", regex: /\b(?:secret|ntn)_[A-Za-z0-9]{32,}\b/g },
+  // GitHub fine-grained PATs
+  { name: "github-pat", regex: /\bgithub_pat_[A-Za-z0-9_]{40,}\b/g },
+  // Telegram bot tokens
+  { name: "telegram-bot-token", regex: /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g },
+  // PEM private keys
+  {
+    name: "private-key",
+    regex: /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z]+ )?PRIVATE KEY-----|$)/g,
+  },
+  // Credentials embedded in URLs (postgres://user:pass@host)
+  { name: "url-credentials", regex: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s:/@]{3,}@[^\s/]+/gi },
+  // key=value style assignments of obviously secret fields
+  {
+    name: "secret-assignment",
+    regex: /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[=:]\s*["']?[^\s"',;]{8,}/gi,
+  },
 ];
 
 // ── Shannon Entropy ──────────────────────────────────────────────────
@@ -56,6 +88,23 @@ const ENTROPY_MIN_LENGTH = 20;
 
 // Matches candidate tokens: long non-whitespace runs
 const TOKEN_RE = /[A-Za-z0-9+/=_\-.]{20,}/g;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const WORD_SEGMENT_RE = /^[A-Za-z_-]+$/;
+
+/**
+ * High-entropy-looking tokens that are not secrets: UUIDs, and file paths /
+ * hostnames / dotted identifiers (several short, mostly alphabetic segments).
+ * Redacting those destroys memory content without protecting anything.
+ */
+function looksBenign(token: string): boolean {
+  if (UUID_RE.test(token)) return true;
+  const segments = token.split(/[/.]/).filter((seg) => seg.length > 0);
+  if (segments.length < 3) return false;
+  if (segments.some((seg) => seg.length >= ENTROPY_MIN_LENGTH)) return false;
+  const wordy = segments.filter((seg) => WORD_SEGMENT_RE.test(seg)).length;
+  return wordy / segments.length >= 0.6;
+}
 
 // ── Redaction Helper ─────────────────────────────────────────────────
 
@@ -205,6 +254,7 @@ export function scanContent(content: string): ScanResult {
       const token = m[0];
       // Skip redaction markers we already inserted
       if (token.startsWith("[REDACTED:")) continue;
+      if (looksBenign(token)) continue;
       if (token.length >= ENTROPY_MIN_LENGTH && shannonEntropy(token) > ENTROPY_THRESHOLD) {
         entropyMatches.push({ match: token, start: m.index, end: m.index + token.length });
       }

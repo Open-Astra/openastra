@@ -387,6 +387,35 @@ export const SkillConditionalBlockedEvent = z.object({
   timestamp: z.number(),
 });
 
+// ── Governance / workflow / billing events ──────────────────────────
+// Emitted by the skill registry, approval gate, durable workflows,
+// outcome billing, audit trail, data plane and tenant governance.
+
+const opt = z.string().optional();
+
+export const SkillInstalledEvent = z.object({ skillId: z.string(), version: z.string(), tenantId: opt, workspaceId: opt });
+export const SkillPublishedEvent = z.object({ skillId: z.string(), version: z.string(), publisherId: z.string() });
+export const SkillRevokedEvent = z.object({ skillId: z.string(), version: z.string(), reason: z.string() });
+export const ApprovalProposalEvent = z.object({ proposalId: z.string(), action: z.string(), riskLevel: opt, tenantId: opt });
+export const ApprovalDecidedEvent = z.object({ proposalId: z.string(), reviewerId: z.string(), action: z.string() });
+export const WorkflowApprovalGrantedEvent = z.object({ runId: z.string(), proposalId: z.string() });
+export const WorkflowRunEvent = z.object({
+  runId: z.string(),
+  workflowId: opt,
+  tenantId: opt,
+  stepId: opt,
+  attempt: z.number().optional(),
+  durationMs: z.number().optional(),
+  error: opt,
+});
+export const BillingOutcomeRecordedEvent = z.object({ tenantId: z.string(), type: z.string(), quantity: z.number() });
+export const BillingInvoiceIssuedEvent = z.object({ invoiceId: z.string(), tenantId: z.string(), total: z.number() });
+export const AuditHighRiskEvent = z.object({ entryId: z.string(), tenantId: opt, action: z.string(), riskLevel: z.string() });
+export const SecurityEgressBlockedEvent = z.object({ tenantId: opt, agentId: opt, destination: z.string(), reason: z.string() });
+export const SecurityEgressRedactedEvent = z.object({ tenantId: opt, destination: z.string(), redactedFields: z.array(z.string()) });
+export const TenantCreatedEvent = z.object({ tenantId: z.string(), name: z.string(), plan: z.string() });
+export const TenantSuspendedEvent = z.object({ tenantId: z.string(), reason: z.string() });
+
 // ── Event Map ───────────────────────────────────────────────────────
 // Maps event names to their Zod schemas and inferred types.
 
@@ -432,6 +461,29 @@ export const EventSchemas = {
   "skill.evolved": SkillEvolvedEvent,
   "tool.composed": ToolComposedEvent,
   "skill.conditional_blocked": SkillConditionalBlockedEvent,
+  "skill.published": SkillPublishedEvent,
+  "skill.installed": SkillInstalledEvent,
+  "skill.revoked": SkillRevokedEvent,
+  "approval.auto_approved": ApprovalProposalEvent,
+  "approval.pending": ApprovalProposalEvent,
+  "approval.escalated": ApprovalProposalEvent,
+  "approval.approved": ApprovalDecidedEvent,
+  "approval.rejected": ApprovalDecidedEvent,
+  "workflow.approval_granted": WorkflowApprovalGrantedEvent,
+  "workflow.created": WorkflowRunEvent,
+  "workflow.started": WorkflowRunEvent,
+  "workflow.step_failed": WorkflowRunEvent,
+  "workflow.completed": WorkflowRunEvent,
+  "workflow.failed": WorkflowRunEvent,
+  "workflow.paused": WorkflowRunEvent,
+  "workflow.dead_lettered": WorkflowRunEvent,
+  "billing.outcome_recorded": BillingOutcomeRecordedEvent,
+  "billing.invoice_issued": BillingInvoiceIssuedEvent,
+  "audit.high_risk": AuditHighRiskEvent,
+  "security.egress_blocked": SecurityEgressBlockedEvent,
+  "security.egress_redacted": SecurityEgressRedactedEvent,
+  "tenant.created": TenantCreatedEvent,
+  "tenant.suspended": TenantSuspendedEvent,
 } as const;
 
 export type EventName = keyof typeof EventSchemas;

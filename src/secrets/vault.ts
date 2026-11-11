@@ -153,6 +153,26 @@ async function fetchAll(): Promise<Record<string, string>> {
   }
 }
 
+// Audit writes must never add a DB round-trip to (or fail) a secret read.
+function audit(key: string, backend: string): void {
+  void Promise.resolve()
+    .then(() => recordSecretAccess(key, backend))
+    .catch(() => {});
+}
+
+/**
+ * When a remote backend (Vault/ASM) is unreachable we fail CLOSED by default
+ * in production: silently reading process.env instead would let a stale or
+ * attacker-planted env value stand in for the managed secret.
+ * Override with SECRET_BACKEND_FAIL_OPEN=true.
+ */
+function failOpen(): boolean {
+  const flag = process.env.SECRET_BACKEND_FAIL_OPEN;
+  if (flag === "true") return true;
+  if (flag === "false") return false;
+  return process.env.NODE_ENV !== "production";
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 /**
@@ -164,7 +184,7 @@ export async function getSecret(key: string): Promise<string | undefined> {
   // Check cache first
   const cached = cache.get(key);
   if (cached && isFresh(cached)) {
-    await recordSecretAccess(key, cfg.backend);
+    audit(key, cfg.backend);
     return cached.value;
   }
 
@@ -172,7 +192,7 @@ export async function getSecret(key: string): Promise<string | undefined> {
     const value = process.env[key];
     if (value !== undefined) {
       cache.set(key, { value, fetchedAt: Date.now() });
-      await recordSecretAccess(key, cfg.backend);
+      audit(key, cfg.backend);
     }
     return value;
   }
@@ -183,16 +203,19 @@ export async function getSecret(key: string): Promise<string | undefined> {
     cacheAll(all);
     const value = all[key];
     if (value !== undefined) {
-      await recordSecretAccess(key, cfg.backend);
+      audit(key, cfg.backend);
     }
     return value;
   } catch (err) {
     log.error(`Failed to fetch secrets from backend "${cfg.backend}":`, (err as Error).message);
-    // Fall back to process.env
+    // A stale cached value from the backend is better than nothing.
+    if (cached) return cached.value;
+    if (!failOpen()) return undefined;
+    // Fall back to process.env (non-production, or SECRET_BACKEND_FAIL_OPEN=true)
     const fallback = process.env[key];
     if (fallback !== undefined) {
       log.warn(`Using env fallback for key "${key}" after backend error`);
-      await recordSecretAccess(key, "env");
+      audit(key, "env");
     }
     return fallback;
   }
