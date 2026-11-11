@@ -42,7 +42,11 @@ export interface CrdtState {
 // ── Vector Clock Operations ────────────────────────────────────────
 
 export function incrementClock(clock: VectorClock, nodeId: string): VectorClock {
-  return { ...clock, [nodeId]: (clock[nodeId] ?? 0) + 1 };
+  // Node ids come from clients: build via entries so "__proto__" and friends
+  // become ordinary own properties instead of touching the prototype chain.
+  const next = new Map<string, number>(Object.entries(clock));
+  next.set(nodeId, (next.get(nodeId) ?? 0) + 1);
+  return Object.fromEntries(next) as VectorClock;
 }
 
 export function mergeClock(a: VectorClock, b: VectorClock): VectorClock {

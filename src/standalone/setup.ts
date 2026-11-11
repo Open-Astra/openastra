@@ -12,7 +12,7 @@
 // TUI that walks you through every configuration option.
 
 import { createInterface } from "node:readline";
-import { writeFile, access, open, chmod } from "node:fs/promises";
+import { writeFile, access, open, constants } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -323,23 +323,22 @@ async function main(): Promise<void> {
   const envPath = join(cwd, ".env");
   const envBody = envLines.join("\n") + "\n";
   let writeEnv = true;
+  // Open (or create, owner read/write only) exactly once and do everything
+  // through that handle, so the "does it already exist?" question and the
+  // write can never refer to different files. .env holds every secret.
+  const envHandle = await open(envPath, constants.O_RDWR | constants.O_CREAT, 0o600);
   try {
-    // "wx" creates the file atomically and fails if it already exists, so the
-    // existence check and the write cannot be raced. .env holds every secret —
-    // owner read/write only.
-    const handle = await open(envPath, "wx", 0o600);
-    try {
-      await handle.writeFile(envBody);
-    } finally {
-      await handle.close();
+    const existing = await envHandle.stat();
+    if (existing.size > 0) {
+      writeEnv = await askYesNo(".env already exists. Overwrite?", false);
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    writeEnv = await askYesNo(".env already exists. Overwrite?", false);
     if (writeEnv) {
-      await writeFile(envPath, envBody, { mode: 0o600 });
-      await chmod(envPath, 0o600).catch(() => {});
+      await envHandle.truncate(0);
+      await envHandle.write(envBody, 0, "utf8");
+      await envHandle.chmod(0o600);
     }
+  } finally {
+    await envHandle.close();
   }
 
   if (writeEnv) {
