@@ -95,6 +95,6 @@ Resolve the key inside the postgres Secret that holds PG_PASSWORD.
 {{- if and (not .Values.secret.create) .Values.postgres.existingSecret.key }}
 {{- .Values.postgres.existingSecret.key }}
 {{- else }}
-PG_PASSWORD
+{{- "PG_PASSWORD" }}
 {{- end }}
 {{- end }}

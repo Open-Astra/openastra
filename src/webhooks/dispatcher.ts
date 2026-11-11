@@ -147,7 +147,7 @@ export async function fireWebhooksForEvent(
   data: Record<string, unknown>,
 ): Promise<void> {
   if (!checkWebhookRate(uid)) {
-    console.warn(`[webhooks] Rate limit exceeded for uid=${uid}`);
+    console.warn("[webhooks] Rate limit exceeded for uid=%s", String(uid).replace(/\n|\r/g, ""));
     return;
   }
 

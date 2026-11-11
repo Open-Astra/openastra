@@ -121,8 +121,12 @@ export function scrubLogOutput(message: string): string {
 /**
  * Scrub an argument that may be a string, object, or other value.
  */
+function stripNewlines(s: string): string {
+  return s.replace(/\n|\r/g, " ");
+}
+
 function scrubArg(arg: unknown): unknown {
-  if (typeof arg === "string") return scrubLogOutput(arg);
+  if (typeof arg === "string") return stripNewlines(scrubLogOutput(arg));
   if (arg instanceof Error) return arg; // Don't modify Error objects
   if (arg !== null && typeof arg === "object") {
     try {
@@ -155,7 +159,7 @@ export function info(tag: string, ...args: unknown[]): void {
 /** Highlight a key-value pair (value in star white) */
 export function kv(tag: string, key: string, value: unknown): void {
   if (QUIET()) return;
-  const scrubbedValue = typeof value === "string" ? scrubLogOutput(value) : value;
+  const scrubbedValue = typeof value === "string" ? stripNewlines(scrubLogOutput(value)) : value;
   console.log(prefix(tag), `${DIM}${key}:${R} ${STAR}${scrubbedValue}${R}`);
 }
 
@@ -187,7 +191,7 @@ export function error(tag: string, ...args: unknown[]): void {
 export function dim(tag: string, ...args: unknown[]): void {
   if (QUIET()) return;
   const scrubbed = scrubArgs(args);
-  console.log(prefix(tag), `${DIM}${scrubbed.join(" ")}${R}`);
+  console.log(prefix(tag), `${DIM}${stripNewlines(scrubbed.join(" "))}${R}`);
 }
 
 /** Section divider */

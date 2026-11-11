@@ -134,7 +134,7 @@ export function createScheduledTasksRouter(): Router {
         tokenUsage: result.tokenUsage,
       });
     } catch (err) {
-      console.error("[scheduled-tasks] Manual run:", err);
+      console.error("[scheduled-tasks] Manual run:", String(err instanceof Error ? err.message : err).replace(/\n|\r/g, " "));
       res.status(500).json({ error: "Failed to run scheduled task" });
     }
   });

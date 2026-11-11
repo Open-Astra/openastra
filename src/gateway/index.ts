@@ -16,6 +16,7 @@ import { runMigrations } from "../db/migrate.js";
 import { jwtAuth } from "./middleware/auth.js";
 import { requestLogger, errorHandler, correlationId } from "./middleware/observability.js";
 import { requestTimeout } from "./middleware/timeout.js";
+import { rateLimit } from "express-rate-limit";
 import { rateLimiter } from "./middleware/ratelimit.js";
 import { tokenBudget } from "./middleware/token-budget.js";
 import { workspaceResolver } from "./middleware/workspace.js";
@@ -386,6 +387,19 @@ app.use = ((...args: any[]) => {
 
 // Security headers — before everything else
 app.use(securityHeaders());
+
+// Baseline per-IP rate limit for every route. Stricter per-route and per-user
+// limits are layered on top further down; this one bounds unauthenticated and
+// otherwise-unlimited endpoints. Tune with GLOBAL_RATE_LIMIT_PER_MINUTE.
+app.use(
+  rateLimit({
+    windowMs: 60_000,
+    limit: Math.max(1, parseInt(process.env.GLOBAL_RATE_LIMIT_PER_MINUTE ?? "600", 10) || 600),
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { error: "Too many requests" },
+  }),
+);
 
 // Correlation ID — stamps X-Request-ID on every request/response
 app.use(correlationId());

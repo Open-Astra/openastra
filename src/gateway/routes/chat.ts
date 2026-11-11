@@ -194,7 +194,7 @@ export function createChatRouter(resolveClient: (config: AgentConfig) => Inferen
 
       res.json(payload);
     } catch (err) {
-      console.error("[chat] Agent loop error:", err);
+      console.error("[chat] Agent loop error:", String(err instanceof Error ? err.message : err).replace(/\n|\r/g, " "));
       res.status(500).json({ error: "Agent processing failed" });
     }
   });
