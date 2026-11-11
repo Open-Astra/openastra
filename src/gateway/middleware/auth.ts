@@ -9,6 +9,18 @@ export interface AuthenticatedRequest extends Request {
   uid: string;
 }
 
+/**
+ * Device fingerprint for this request, or undefined when device binding
+ * (BIND_JWT_TO_DEVICE=true) is off. Must be computed identically when a
+ * token is signed and when it is verified.
+ */
+export function requestFingerprint(req: Request): string | undefined {
+  if (process.env.BIND_JWT_TO_DEVICE !== "true") return undefined;
+  const ua = req.headers["user-agent"] ?? "";
+  const ip = req.ip ?? req.socket.remoteAddress ?? "";
+  return computeFingerprint(ua, ip);
+}
+
 export function jwtAuth() {
   return async (
     req: Request,
@@ -25,14 +37,8 @@ export function jwtAuth() {
     const token = authHeader.slice(7);
 
     try {
-      // Compute device fingerprint when binding is enabled
-      let fingerprint: string | undefined;
-      if (process.env.BIND_JWT_TO_DEVICE === "true") {
-        const ua = req.headers["user-agent"] ?? "";
-        const ip = req.ip ?? req.socket.remoteAddress ?? "";
-        fingerprint = computeFingerprint(ua, ip);
-      }
-      const { uid } = await verifyAccessToken(token, fingerprint);
+      // Device fingerprint is undefined unless binding is enabled
+      const { uid } = await verifyAccessToken(token, requestFingerprint(req));
       (req as AuthenticatedRequest).uid = uid;
       next();
     } catch {

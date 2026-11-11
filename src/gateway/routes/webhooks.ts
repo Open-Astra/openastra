@@ -131,7 +131,10 @@ export function createWebhookRouter(): Router {
         data: { test: true, message: "This is a test webhook from Astra." },
       });
 
-      res.json({ delivery });
+      // Never echo the target's response body: it would turn this endpoint
+      // into a read-back channel for whatever the URL resolves to.
+      const { responseBody: _responseBody, ...safeDelivery } = delivery;
+      res.json({ delivery: safeDelivery });
     } catch (err) {
       console.error("[webhooks] Test error:", err);
       res.status(500).json({ error: "Failed to send test webhook" });

@@ -20,7 +20,8 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express } from "express";
+import type { IRouter } from "express";
+import { verifySharedSecret } from "./webhook-verify.js";
 
 const log = createLogger("signal");
 
@@ -64,7 +65,7 @@ export class SignalAdapter implements ChannelAdapter {
   private apiUrl: string;
   private phoneNumber: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private running = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -72,7 +73,7 @@ export class SignalAdapter implements ChannelAdapter {
     apiUrl: string,
     phoneNumber: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.apiUrl = apiUrl.replace(/\/$/, "");
     this.phoneNumber = phoneNumber;
@@ -133,6 +134,13 @@ export class SignalAdapter implements ChannelAdapter {
     if (this.app) {
       // Register webhook endpoint
       this.app.post("/webhooks/signal", (req, res) => {
+        // signal-cli-rest-api does not sign callbacks — require
+        // SIGNAL_WEBHOOK_SECRET (header, or ?secret= in the callback URL).
+        if (!verifySharedSecret(req, process.env.SIGNAL_WEBHOOK_SECRET, { allowQuery: true })) {
+          log.warn("Rejected Signal webhook — missing or invalid secret");
+          res.sendStatus(403);
+          return;
+        }
         res.status(200).json({ ok: true });
         const payload = req.body as SignalMessage;
         this.handleSignalMessage(payload).catch((err) => {
@@ -261,7 +269,7 @@ export function startSignalChannel(
   apiUrl: string,
   phoneNumber: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new SignalAdapter(apiUrl, phoneNumber, resolveClient, app);
   _adapter.start();

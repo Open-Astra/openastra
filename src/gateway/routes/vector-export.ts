@@ -8,6 +8,11 @@ import {
   updateExportJob,
   type VectorExportTarget,
 } from "../../memory/vector-export.js";
+import { requireOwned } from "../middleware/ownership.js";
+import { createLogger } from "../../utils/logger.js";
+
+const log = createLogger("vector-export");
+const ListQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) });
 
 export function createVectorExportRouter(): Router {
   const router = Router();
@@ -16,11 +21,13 @@ export function createVectorExportRouter(): Router {
     try {
       const { workspaceId } = (req as unknown as WorkspaceAwareRequest).workspace;
       if (!workspaceId) return res.status(400).json({ error: "workspace required" });
-      const limit = req.query.limit !== undefined ? Number(req.query.limit) : 20;
-      const jobs = await listExportJobs(workspaceId, limit);
+      const q = ListQuery.safeParse(req.query);
+      if (!q.success) return res.status(400).json({ error: "Invalid limit" });
+      const jobs = await listExportJobs(workspaceId, q.data.limit);
       return res.json(jobs);
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      log.error("Request failed:", err);
+      return res.status(500).json({ error: "Vector export request failed" });
     }
   });
 
@@ -32,7 +39,8 @@ export function createVectorExportRouter(): Router {
       if (!job) return res.status(404).json({ error: "not found" });
       return res.json(job);
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      log.error("Request failed:", err);
+      return res.status(500).json({ error: "Vector export request failed" });
     }
   });
 
@@ -51,27 +59,29 @@ export function createVectorExportRouter(): Router {
       const job = await createExportJob(workspaceId, target as VectorExportTarget, targetConfig);
       return res.status(201).json(job);
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      log.error("Request failed:", err);
+      return res.status(500).json({ error: "Vector export request failed" });
     }
   });
 
   const UpdateExportJobBody = z.object({
     status: z.enum(["pending", "running", "done", "failed"]),
-    recordsExported: z.number().optional(),
-    errorMessage: z.string().optional(),
+    recordsExported: z.number().int().min(0).optional(),
+    errorMessage: z.string().max(4000).optional(),
   });
 
-  router.patch("/:id", async (req, res) => {
+  router.patch("/:id", requireOwned("vectorExportJob"), async (req, res) => {
     try {
       const { workspaceId } = (req as unknown as WorkspaceAwareRequest).workspace;
       if (!workspaceId) return res.status(400).json({ error: "workspace required" });
       const parsed = UpdateExportJobBody.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
       const { status, recordsExported, errorMessage } = parsed.data;
-      await updateExportJob(req.params.id, status, { recordsExported, errorMessage });
+      await updateExportJob(req.params.id as string, status, { recordsExported, errorMessage });
       return res.json({ ok: true });
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      log.error("Request failed:", err);
+      return res.status(500).json({ error: "Vector export request failed" });
     }
   });
 

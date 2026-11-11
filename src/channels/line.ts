@@ -20,8 +20,9 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request } from "express";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import type { IRouter, Request } from "express";
+import { createHmac } from "node:crypto";
+import { getRawBody, safeEqual } from "./webhook-verify.js";
 
 const log = createLogger("line");
 
@@ -63,14 +64,14 @@ export class LineAdapter implements ChannelAdapter {
   private channelAccessToken: string;
   private channelSecret: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private userNameCache = new Map<string, string>();
 
   constructor(
     channelAccessToken: string,
     channelSecret: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.channelAccessToken = channelAccessToken;
     this.channelSecret = channelSecret;
@@ -130,15 +131,13 @@ export class LineAdapter implements ChannelAdapter {
     const signature = req.headers["x-line-signature"] as string | undefined;
     if (!signature) return false;
 
+    const raw = getRawBody(req);
+    if (!raw) return false;
     const expected = createHmac("sha256", this.channelSecret)
-      .update(JSON.stringify(req.body))
+      .update(raw)
       .digest("base64");
 
-    try {
-      return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-    } catch {
-      return false;
-    }
+    return safeEqual(signature, expected);
   }
 
   // ── ChannelAdapter Interface ──────────────────────────────────────
@@ -278,7 +277,7 @@ export function startLineChannel(
   token: string,
   secret: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new LineAdapter(token, secret, resolveClient, app);
   _adapter.start();

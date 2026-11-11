@@ -24,7 +24,7 @@ import type {
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Express, Request, Response } from "express";
+import type { IRouter, Request, Response } from "express";
 import { getPool } from "../config/postgres.js";
 
 const log = createLogger("linear-channel");
@@ -341,7 +341,7 @@ let _adapter: LinearAdapter | null = null;
 export function startLinearChannel(
   config: LinearChannelConfig,
   resolveClient: ClientResolver,
-  app: Express,
+  app: IRouter,
 ): void {
   _adapter = new LinearAdapter(config.apiKey);
 

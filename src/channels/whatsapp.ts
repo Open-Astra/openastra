@@ -22,7 +22,24 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express } from "express";
+import type { IRouter, Request } from "express";
+import { createHmac } from "node:crypto";
+import { getRawBody, safeEqual, unsignedWebhooksAllowed } from "./webhook-verify.js";
+
+/**
+ * Verify Meta's X-Hub-Signature-256 over the raw body using
+ * WHATSAPP_APP_SECRET. Fails closed when the secret is not configured.
+ */
+function verifyMetaSignature(req: Request): boolean {
+  const appSecret = process.env.WHATSAPP_APP_SECRET;
+  if (!appSecret) return unsignedWebhooksAllowed();
+  const header = req.headers["x-hub-signature-256"];
+  const signature = Array.isArray(header) ? header[0] : header;
+  const raw = getRawBody(req);
+  if (!signature || !raw) return false;
+  const expected = `sha256=${createHmac("sha256", appSecret).update(raw).digest("hex")}`;
+  return safeEqual(signature, expected);
+}
 
 const log = createLogger("whatsapp");
 
@@ -71,14 +88,14 @@ export class WhatsAppAdapter implements ChannelAdapter {
   private accessToken: string;
   private verifyToken: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
 
   constructor(
     phoneNumberId: string,
     accessToken: string,
     verifyToken: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.phoneNumberId = phoneNumberId;
     this.accessToken = accessToken;
@@ -147,7 +164,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         const token = req.query["hub.verify_token"] as string;
         const challenge = req.query["hub.challenge"] as string;
 
-        if (mode === "subscribe" && token === this.verifyToken) {
+        if (mode === "subscribe" && safeEqual(token, this.verifyToken)) {
           log.info("Webhook verified by Meta");
           res.status(200).send(challenge);
         } else {
@@ -158,7 +175,14 @@ export class WhatsAppAdapter implements ChannelAdapter {
 
       // Message webhook (POST)
       this.app.post("/webhooks/whatsapp", (req, res) => {
-        res.sendStatus(200); // Always acknowledge quickly
+        // Meta signs every delivery with the app secret (X-Hub-Signature-256).
+        // Without this check anyone can inject messages as any phone number.
+        if (!verifyMetaSignature(req)) {
+          log.warn("Rejected WhatsApp webhook — missing or invalid X-Hub-Signature-256");
+          res.sendStatus(403);
+          return;
+        }
+        res.sendStatus(200); // Acknowledge quickly
         const payload = req.body as WAWebhookPayload;
         this.handleWebhook(payload).catch((err) => {
           log.error("Webhook handler error:", err);
@@ -277,7 +301,7 @@ export function startWhatsAppChannel(
   accessToken: string,
   verifyToken: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new WhatsAppAdapter(phoneNumberId, accessToken, verifyToken, resolveClient, app);
   _adapter.start();

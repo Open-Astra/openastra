@@ -5,6 +5,7 @@ import {
   createChannel, subscribe, unsubscribe, broadcast,
   getChannels, getChannel, deleteChannel, getMessages,
 } from "../../agents/team-channels.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const CreateBody = z.object({ name: z.string(), description: z.string().optional() });
 const AgentBody = z.object({ agentId: z.string() });
@@ -32,42 +33,42 @@ export function createTeamChannelsRouter(): Router {
     res.json({ channels: await getChannels(workspaceId) });
   });
 
-  router.get("/team-channels/:id", async (req, res) => {
-    const ch = await getChannel(req.params.id);
+  router.get("/team-channels/:id", requireOwned("teamChannel"), async (req, res) => {
+    const ch = await getChannel((req.params.id as string));
     if (!ch) return res.status(404).json({ error: "Channel not found" });
     res.json(ch);
   });
 
-  router.delete("/team-channels/:id", async (req, res) => {
-    await deleteChannel(req.params.id);
+  router.delete("/team-channels/:id", requireOwned("teamChannel"), async (req, res) => {
+    await deleteChannel((req.params.id as string));
     res.json({ deleted: true });
   });
 
-  router.post("/team-channels/:id/subscribe", async (req, res) => {
+  router.post("/team-channels/:id/subscribe", requireOwned("teamChannel"), async (req, res) => {
     const parsed = AgentBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    await subscribe(req.params.id, parsed.data.agentId);
+    await subscribe((req.params.id as string), parsed.data.agentId);
     res.json({ subscribed: true });
   });
 
-  router.post("/team-channels/:id/unsubscribe", async (req, res) => {
+  router.post("/team-channels/:id/unsubscribe", requireOwned("teamChannel"), async (req, res) => {
     const parsed = AgentBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    await unsubscribe(req.params.id, parsed.data.agentId);
+    await unsubscribe((req.params.id as string), parsed.data.agentId);
     res.json({ unsubscribed: true });
   });
 
-  router.post("/team-channels/:id/messages", async (req, res) => {
+  router.post("/team-channels/:id/messages", requireOwned("teamChannel"), async (req, res) => {
     const parsed = MsgBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    const msg = await broadcast(req.params.id, parsed.data.agentId, parsed.data.message, parsed.data.metadata);
+    const msg = await broadcast((req.params.id as string), parsed.data.agentId, parsed.data.message, parsed.data.metadata);
     res.status(201).json(msg);
   });
 
-  router.get("/team-channels/:id/messages", async (req, res) => {
+  router.get("/team-channels/:id/messages", requireOwned("teamChannel"), async (req, res) => {
     const limit = parseInt(String(req.query["limit"] ?? "50"), 10);
     const since = req.query["since"] ? new Date(String(req.query["since"])) : undefined;
-    const msgs = await getMessages(req.params.id, { limit, since });
+    const msgs = await getMessages((req.params.id as string), { limit, since });
     res.json({ messages: msgs });
   });
 

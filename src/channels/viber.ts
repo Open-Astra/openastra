@@ -20,8 +20,9 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request } from "express";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import type { IRouter, Request } from "express";
+import { createHmac } from "node:crypto";
+import { getRawBody, safeEqual } from "./webhook-verify.js";
 
 const log = createLogger("viber");
 
@@ -63,13 +64,13 @@ export class ViberAdapter implements ChannelAdapter {
   private authToken: string;
   private botName: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
 
   constructor(
     authToken: string,
     botName: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.authToken = authToken;
     this.botName = botName;
@@ -104,15 +105,13 @@ export class ViberAdapter implements ChannelAdapter {
     const signature = req.headers["x-viber-content-signature"] as string | undefined;
     if (!signature) return false;
 
+    const raw = getRawBody(req);
+    if (!raw) return false;
     const expected = createHmac("sha256", this.authToken)
-      .update(JSON.stringify(req.body))
+      .update(raw)
       .digest("hex");
 
-    try {
-      return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-    } catch {
-      return false;
-    }
+    return safeEqual(signature, expected);
   }
 
   // ── ChannelAdapter Interface ──────────────────────────────────────
@@ -239,7 +238,7 @@ export function startViberChannel(
   authToken: string,
   botName: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new ViberAdapter(authToken, botName, resolveClient, app);
   _adapter.start();

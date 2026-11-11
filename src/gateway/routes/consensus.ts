@@ -8,6 +8,7 @@ import {
   getConsensusRounds,
   getConsensusRound,
 } from "../../agents/consensus.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const ProposalBody = z.object({
   topic: z.string(),
@@ -41,21 +42,21 @@ export function createConsensusRouter(): Router {
     res.json({ rounds });
   });
 
-  router.get("/consensus/rounds/:id", async (req, res) => {
-    const round = await getConsensusRound(req.params.id);
+  router.get("/consensus/rounds/:id", requireOwned("consensusRound"), async (req, res) => {
+    const round = await getConsensusRound((req.params.id as string));
     if (!round) return res.status(404).json({ error: "Round not found" });
     res.json(round);
   });
 
-  router.post("/consensus/rounds/:id/votes", async (req, res) => {
+  router.post("/consensus/rounds/:id/votes", requireOwned("consensusRound"), async (req, res) => {
     const parsed = VoteBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    const vote = await submitVote(req.params.id, parsed.data.agentId, parsed.data.vote, parsed.data.reasoning);
+    const vote = await submitVote((req.params.id as string), parsed.data.agentId, parsed.data.vote, parsed.data.reasoning);
     res.status(201).json(vote);
   });
 
-  router.post("/consensus/rounds/:id/resolve", async (req, res) => {
-    const round = await resolveConsensus(req.params.id);
+  router.post("/consensus/rounds/:id/resolve", requireOwned("consensusRound"), async (req, res) => {
+    const round = await resolveConsensus((req.params.id as string));
     res.json(round);
   });
 

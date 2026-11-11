@@ -21,8 +21,9 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express, Request } from "express";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import type { IRouter, Request } from "express";
+import { createHmac } from "node:crypto";
+import { getRawBody, safeEqual } from "./webhook-verify.js";
 
 const log = createLogger("slack");
 
@@ -70,7 +71,7 @@ export class SlackAdapter implements ChannelAdapter {
   private botToken: string;
   private signingSecret: string;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private botUserId: string | null = null;
   private userNameCache = new Map<string, string>();
 
@@ -78,7 +79,7 @@ export class SlackAdapter implements ChannelAdapter {
     botToken: string,
     signingSecret: string,
     resolveClient: ClientResolver,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.botToken = botToken;
     this.signingSecret = signingSecret;
@@ -132,15 +133,13 @@ export class SlackAdapter implements ChannelAdapter {
     const now = Math.floor(Date.now() / 1000);
     if (Math.abs(now - parseInt(timestamp, 10)) > 300) return false;
 
-    const rawBody = JSON.stringify(req.body);
-    const baseString = `v0:${timestamp}:${rawBody}`;
+    // Slack signs the exact bytes it sent — never a re-serialised body
+    const raw = getRawBody(req);
+    if (!raw) return false;
+    const baseString = `v0:${timestamp}:${raw.toString("utf8")}`;
     const expected = `v0=${createHmac("sha256", this.signingSecret).update(baseString).digest("hex")}`;
 
-    try {
-      return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-    } catch {
-      return false;
-    }
+    return safeEqual(signature, expected);
   }
 
   // ── ChannelAdapter Interface ───────────────────────────────────
@@ -172,18 +171,19 @@ export class SlackAdapter implements ChannelAdapter {
 
     if (this.app) {
       this.app.post("/webhooks/slack", (req, res) => {
+        // Verify the signature first — Slack signs the URL-verification
+        // challenge too, so nothing is answered for unsigned callers.
+        if (!this.verifyRequest(req)) {
+          log.warn("Invalid request signature");
+          res.sendStatus(403);
+          return;
+        }
+
         const payload = req.body as SlackEventPayload;
 
         // URL verification challenge
         if (payload.type === "url_verification") {
           res.status(200).json({ challenge: payload.challenge });
-          return;
-        }
-
-        // Verify request signature
-        if (!this.verifyRequest(req)) {
-          log.warn("Invalid request signature");
-          res.sendStatus(403);
           return;
         }
 
@@ -294,7 +294,7 @@ export function startSlackBot(
   botToken: string,
   signingSecret: string,
   resolveClient: ClientResolver,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new SlackAdapter(botToken, signingSecret, resolveClient, app);
   _adapter.start();

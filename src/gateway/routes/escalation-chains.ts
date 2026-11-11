@@ -5,6 +5,7 @@ import {
   createChain, getChains, getChain, updateChain, deleteChain,
   triggerEscalation, acknowledgeEscalation, resolveEscalation, getEscalations,
 } from "../../agents/escalation.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const LevelSchema = z.object({
   agentId: z.string(),
@@ -13,12 +14,22 @@ const LevelSchema = z.object({
 });
 
 const ChainBody = z.object({
-  name: z.string(),
-  levels: z.array(LevelSchema).min(1),
+  name: z.string().min(1).max(200),
+  levels: z.array(LevelSchema).min(1).max(20),
 });
 
+const UpdateChainBody = z.object({
+  name: z.string().min(1).max(200).optional(),
+  levels: z.array(LevelSchema).min(1).max(20).optional(),
+  active: z.boolean().optional(),
+}).strict();
+
+const AckBody = z.object({ agentId: z.string().min(1).max(128) });
+const ResolveBody = z.object({ resolution: z.string().min(1).max(4000) });
+const ESCALATION_STATUSES = z.enum(["active", "acknowledged", "resolved", "expired"]);
+
 const TriggerBody = z.object({
-  reason: z.string(),
+  reason: z.string().min(1).max(4000),
   context: z.unknown().optional(),
 });
 
@@ -40,49 +51,54 @@ export function createEscalationChainsRouter(): Router {
     res.json({ chains: await getChains(workspaceId) });
   });
 
-  router.get("/escalation-chains/:id", async (req, res) => {
-    const chain = await getChain(req.params.id);
+  router.get("/escalation-chains/:id", requireOwned("escalationChain"), async (req, res) => {
+    const chain = await getChain((req.params.id as string));
     if (!chain) return res.status(404).json({ error: "Chain not found" });
     res.json(chain);
   });
 
-  router.put("/escalation-chains/:id", async (req, res) => {
-    await updateChain(req.params.id, req.body);
+  router.put("/escalation-chains/:id", requireOwned("escalationChain"), async (req, res) => {
+    const parsed = UpdateChainBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+    await updateChain((req.params.id as string), parsed.data);
     res.json({ updated: true });
   });
 
-  router.delete("/escalation-chains/:id", async (req, res) => {
-    await deleteChain(req.params.id);
+  router.delete("/escalation-chains/:id", requireOwned("escalationChain"), async (req, res) => {
+    await deleteChain((req.params.id as string));
     res.json({ deleted: true });
   });
 
-  router.post("/escalation-chains/:id/trigger", async (req, res) => {
+  router.post("/escalation-chains/:id/trigger", requireOwned("escalationChain"), async (req, res) => {
     const workspaceId = (req as unknown as WorkspaceAwareRequest).workspace.workspaceId;
     if (!workspaceId) return res.status(400).json({ error: "Workspace required" });
     const parsed = TriggerBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    const escalation = await triggerEscalation(req.params.id, workspaceId, parsed.data.reason, parsed.data.context);
+    const escalation = await triggerEscalation((req.params.id as string), workspaceId, parsed.data.reason, parsed.data.context);
     res.status(201).json(escalation);
   });
 
   router.get("/escalations", async (req, res) => {
     const workspaceId = (req as unknown as WorkspaceAwareRequest).workspace.workspaceId;
     if (!workspaceId) return res.status(400).json({ error: "Workspace required" });
-    const status = req.query["status"] ? String(req.query["status"]) : undefined;
-    res.json({ escalations: await getEscalations(workspaceId, status) });
+    const statusParsed = ESCALATION_STATUSES.optional().safeParse(req.query["status"]);
+    if (!statusParsed.success) return res.status(400).json({ error: "Invalid status" });
+    res.json({ escalations: await getEscalations(workspaceId, statusParsed.data) });
   });
 
-  router.post("/escalations/:id/acknowledge", async (req, res) => {
-    const { agentId } = req.body;
-    if (!agentId) return res.status(400).json({ error: "agentId required" });
-    await acknowledgeEscalation(req.params.id, agentId);
+  router.post("/escalations/:id/acknowledge", requireOwned("escalationEvent"), async (req, res) => {
+    const body = AckBody.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "agentId required" });
+    const { agentId } = body.data;
+    await acknowledgeEscalation((req.params.id as string), agentId);
     res.json({ acknowledged: true });
   });
 
-  router.post("/escalations/:id/resolve", async (req, res) => {
-    const { resolution } = req.body;
-    if (!resolution) return res.status(400).json({ error: "resolution required" });
-    await resolveEscalation(req.params.id, resolution);
+  router.post("/escalations/:id/resolve", requireOwned("escalationEvent"), async (req, res) => {
+    const body = ResolveBody.safeParse(req.body);
+    if (!body.success) return res.status(400).json({ error: "resolution required" });
+    const { resolution } = body.data;
+    await resolveEscalation((req.params.id as string), resolution);
     res.json({ resolved: true });
   });
 

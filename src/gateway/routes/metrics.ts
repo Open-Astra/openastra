@@ -5,7 +5,7 @@ import { getConnectedUserCount } from "../ws.js";
 import { getRegisteredToolCount } from "../../tools/index.js";
 import { getSkillManifests } from "../../skills/registry.js";
 import { getCacheStats } from "../../tools/cache.js";
-import { jwtAuth } from "../middleware/auth.js";
+import { platformAdmin } from "../middleware/platform-admin.js";
 
 // ── Metrics & Readiness Routes ──────────────────────────────────
 // Provides operational metrics and Kubernetes-style readiness probes.
@@ -38,8 +38,9 @@ export function createMetricsRouter(): Router {
     }
   });
 
-  // GET /metrics — operational metrics (requires auth — exposes billing/session stats)
-  router.get("/metrics", jwtAuth(), async (_req, res) => {
+  // GET /metrics — platform-wide operational metrics (billing, session and
+  // message totals across every tenant). Operator only: X-Api-Key.
+  router.get("/metrics", platformAdmin(), async (_req, res) => {
     const pool = getPool();
 
     // Gather stats in parallel

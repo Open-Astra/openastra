@@ -5,6 +5,7 @@ import {
   createTaskNode, addDependency, getExecutionOrder, detectCycles, completeNode, deleteNode,
 } from "../../agents/dependency-graph.js";
 import { getPool } from "../../config/postgres.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const NodeBody = z.object({
   name: z.string(),
@@ -64,13 +65,13 @@ export function createDependencyGraphRouter(): Router {
     res.json({ cycles, hasCycles: cycles.length > 0 });
   });
 
-  router.post("/dependency-graph/nodes/:id/complete", async (req, res) => {
-    await completeNode(req.params.id);
+  router.post("/dependency-graph/nodes/:id/complete", requireOwned("taskGraphNode"), async (req, res) => {
+    await completeNode((req.params.id as string));
     res.json({ completed: true });
   });
 
-  router.delete("/dependency-graph/nodes/:id", async (req, res) => {
-    await deleteNode(req.params.id);
+  router.delete("/dependency-graph/nodes/:id", requireOwned("taskGraphNode"), async (req, res) => {
+    await deleteNode((req.params.id as string));
     res.json({ deleted: true });
   });
 

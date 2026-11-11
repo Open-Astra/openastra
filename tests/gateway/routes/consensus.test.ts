@@ -34,7 +34,9 @@ function callRoute(
     throw new Error(`Route not found: ${method.toUpperCase()} ${path}`);
   }
 
-  const handler = layer.route.stack[0].handle;
+  // The route handler is the last entry; /:id routes are preceded by the
+  // requireOwned() workspace-ownership guard (covered in its own test below).
+  const handler = layer.route.stack.at(-1).handle;
   const req = {
     method: method.toUpperCase(),
     path,
@@ -158,5 +160,49 @@ describe("consensus router", () => {
     expect((result.res.json as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({
       error: "Workspace required",
     });
+  });
+});
+
+describe("consensus router — tenant isolation", () => {
+  it("guards every /:id route with a workspace-ownership check", async () => {
+    const router = createConsensusRouter();
+    const idRoutes = (router as any).stack.filter((l: any) => l.route?.path?.includes(":id"));
+    expect(idRoutes.length).toBeGreaterThan(0);
+
+    for (const layer of idRoutes) {
+      // guard + handler
+      expect(layer.route.stack.length).toBeGreaterThanOrEqual(2);
+      const guard = layer.route.stack[0].handle;
+
+      // A round owned by another workspace → 404, handler never reached
+      mockPool.query.mockResolvedValueOnce({ rows: [] });
+      const res = createMockResponse();
+      const next = vi.fn();
+      await guard(
+        { params: { id: "11111111-1111-1111-1111-111111111111" }, workspace: { workspaceId: "workspace-1" } },
+        res,
+        next,
+      );
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(next).not.toHaveBeenCalled();
+      const [sql, params] = mockPool.query.mock.calls.at(-1)!;
+      expect(sql).toContain("workspace_id = $2");
+      expect(params).toEqual(["11111111-1111-1111-1111-111111111111", "workspace-1"]);
+
+      // Owned → passes through
+      mockPool.query.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });
+      const next2 = vi.fn();
+      await guard(
+        { params: { id: "11111111-1111-1111-1111-111111111111" }, workspace: { workspaceId: "workspace-1" } },
+        createMockResponse(),
+        next2,
+      );
+      expect(next2).toHaveBeenCalled();
+
+      // No workspace → 400
+      const res3 = createMockResponse();
+      await guard({ params: { id: "x" }, workspace: { workspaceId: null } }, res3, vi.fn());
+      expect(res3.status).toHaveBeenCalledWith(400);
+    }
   });
 });

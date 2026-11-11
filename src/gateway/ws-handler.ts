@@ -5,11 +5,9 @@ import type { AgentConfig } from "../agents/types.js";
 import type { InferenceClient } from "../inference/types.js";
 import type { SessionSurface } from "../sessions/types.js";
 import { runAgentLoopStream } from "../agents/loop-stream.js";
-import { getAgentConfig } from "../config/agents.js";
-import { resolveAgentForWorkspace } from "../agents/config-store.js";
+import { authorizeAgentRun } from "./agent-access.js";
 import { trackTokenUsage } from "../billing/tracker.js";
 import { handleCommand } from "./commands.js";
-import { getMemberRole } from "../workspaces/store.js";
 
 // ── Inbound Frame Schemas ───────────────────────────────────────────
 
@@ -161,30 +159,15 @@ async function handleMessageFrame(
     return;
   }
 
-  let agentConfig: AgentConfig;
-  try {
-    agentConfig = getAgentConfig(agentId);
-  } catch {
-    sendFrame(socket, { type: "error", id, message: `Unknown agent: ${agentId}` });
+  // Same authorization as POST /agent/chat: membership, agent ownership
+  // (global agents only when no workspace is given), workspace model policy
+  // and the caller's token budget.
+  const decision = await authorizeAgentRun(uid, agentId, frame.workspaceId ?? null);
+  if (!decision.ok) {
+    sendFrame(socket, { type: "error", id, message: decision.message });
     return;
   }
-
-  // Enforce workspace isolation when a workspaceId is provided
-  if (frame.workspaceId) {
-    // Verify the user is actually a member of this workspace
-    const role = await getMemberRole(frame.workspaceId, uid);
-    if (!role) {
-      sendFrame(socket, { type: "error", id, message: "Not a member of this workspace" });
-      return;
-    }
-
-    const resolved = await resolveAgentForWorkspace(agentId, agentConfig, frame.workspaceId);
-    if (!resolved) {
-      sendFrame(socket, { type: "error", id, message: "Agent not accessible in this workspace" });
-      return;
-    }
-    agentConfig = resolved.config;
-  }
+  const agentConfig: AgentConfig = decision.config;
 
   const inferenceClient = resolveClient(agentConfig);
   const controller = new AbortController();
@@ -198,6 +181,7 @@ async function handleMessageFrame(
       inferenceClient,
       sessionKey,
       controller.signal,
+      frame.workspaceId,
     );
 
     for await (const event of stream) {
@@ -248,7 +232,7 @@ async function handleMessageFrame(
           });
 
           // Fire-and-forget token tracking
-          trackTokenUsage(uid, agentId, event.tokenUsage, event.sessionId).catch(() => {});
+          trackTokenUsage(uid, agentId, event.tokenUsage, event.sessionId, frame.workspaceId).catch(() => {});
           break;
 
         case "error":

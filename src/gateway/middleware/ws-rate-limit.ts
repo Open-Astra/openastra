@@ -5,6 +5,7 @@
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import { createLogger } from "../../utils/logger.js";
+import { wsClientIp } from "../ws-auth.js";
 
 const log = createLogger("ws-rate-limit");
 
@@ -39,11 +40,9 @@ cleanupInterval.unref();
  * Extract client IP from an HTTP request (respects X-Forwarded-For behind proxy).
  */
 function getClientIp(req: IncomingMessage): string {
-  const forwarded = req.headers["x-forwarded-for"];
-  if (typeof forwarded === "string") {
-    return forwarded.split(",")[0]!.trim();
-  }
-  return req.socket.remoteAddress ?? "unknown";
+  // X-Forwarded-For is only honoured when TRUST_PROXY is configured —
+  // otherwise any client could pick its own rate-limit bucket.
+  return wsClientIp(req);
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   createMentorshipPair, getMentorshipPairs, getMentorshipPair,
   endMentorship, recordMentoringSession, getMentoringSessions,
 } from "../../agents/mentoring.js";
+import { requireOwned } from "../middleware/ownership.js";
 
 const PairBody = z.object({
   mentorId: z.string(),
@@ -39,26 +40,26 @@ export function createMentoringRouter(): Router {
     res.json({ pairs });
   });
 
-  router.get("/mentoring/pairs/:id", async (req, res) => {
-    const pair = await getMentorshipPair(req.params.id);
+  router.get("/mentoring/pairs/:id", requireOwned("mentorshipPair"), async (req, res) => {
+    const pair = await getMentorshipPair((req.params.id as string));
     if (!pair) return res.status(404).json({ error: "Pair not found" });
     res.json(pair);
   });
 
-  router.delete("/mentoring/pairs/:id", async (req, res) => {
-    await endMentorship(req.params.id);
+  router.delete("/mentoring/pairs/:id", requireOwned("mentorshipPair"), async (req, res) => {
+    await endMentorship((req.params.id as string));
     res.json({ ended: true });
   });
 
-  router.post("/mentoring/pairs/:id/sessions", async (req, res) => {
+  router.post("/mentoring/pairs/:id/sessions", requireOwned("mentorshipPair"), async (req, res) => {
     const parsed = SessionBody.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-    const session = await recordMentoringSession(req.params.id, parsed.data.insights);
+    const session = await recordMentoringSession((req.params.id as string), parsed.data.insights);
     res.status(201).json(session);
   });
 
-  router.get("/mentoring/pairs/:id/sessions", async (req, res) => {
-    const sessions = await getMentoringSessions(req.params.id);
+  router.get("/mentoring/pairs/:id/sessions", requireOwned("mentorshipPair"), async (req, res) => {
+    const sessions = await getMentoringSessions((req.params.id as string));
     res.json({ sessions });
   });
 

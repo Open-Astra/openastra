@@ -19,6 +19,18 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 // Token length in bytes (32 bytes = 64 hex chars)
 const TOKEN_BYTES = 32;
 
+// Credential-in-body endpoints. They establish a session rather than act on
+// one — there is no ambient authority for a cross-site request to abuse —
+// and a first-time client has no CSRF cookie yet, so enforcing the check
+// here only made the first login/registration fail with 403.
+const EXEMPT_PATHS = new Set(["/auth/login", "/auth/register", "/auth/refresh"]);
+
+function tokensMatch(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+}
+
 export function csrfProtection() {
   return (req: Request, res: Response, next: NextFunction): void => {
     // Ensure a CSRF token cookie exists — generate one if missing
@@ -40,10 +52,18 @@ export function csrfProtection() {
       return;
     }
 
-    // API clients using Bearer tokens are exempt — CSRF targets browser
-    // sessions with cookies, not stateless API key/JWT auth.
+    if (EXEMPT_PATHS.has(req.path)) {
+      next();
+      return;
+    }
+
+    // Requests authenticated by an explicit header are exempt: a browser
+    // never attaches Authorization or X-Api-Key to a cross-site request on
+    // its own, so they cannot be forged. Every authenticated route in the
+    // gateway uses header credentials (there is no cookie session); a
+    // bogus header value is simply rejected by that route's auth check.
     const authHeader = req.headers.authorization;
-    if (authHeader?.startsWith("Bearer ")) {
+    if (authHeader?.startsWith("Bearer ") || req.headers["x-api-key"]) {
       next();
       return;
     }
@@ -51,7 +71,7 @@ export function csrfProtection() {
     // State-changing request without Bearer auth — validate CSRF token
     const headerToken = req.headers[CSRF_HEADER] as string | undefined;
 
-    if (!headerToken || !cookieToken || headerToken !== cookieToken) {
+    if (!headerToken || !cookieToken || !tokensMatch(headerToken, cookieToken)) {
       res.status(403).json({
         error: "CSRF token validation failed",
         hint: `Read the "${CSRF_COOKIE}" cookie and send it as the "${CSRF_HEADER}" header.`,

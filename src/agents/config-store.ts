@@ -51,6 +51,13 @@ export async function getAgentConfigs(workspaceId: string): Promise<AgentConfig[
   return rows.map(rowToConfig);
 }
 
+// Scoping semantics for `workspaceId`:
+//   string    → only an agent owned by that workspace
+//   null      → personal scope: only global agents (workspace_id IS NULL).
+//               A request without a workspace must never see another
+//               tenant's agent.
+//   undefined → unscoped. Internal/CLI callers only — never pass a
+//               request-derived value that may be undefined.
 export async function getAgentConfigById(id: string, workspaceId?: string | null): Promise<AgentConfig | null> {
   const pool = getPool();
   const { rows } = workspaceId
@@ -58,10 +65,15 @@ export async function getAgentConfigById(id: string, workspaceId?: string | null
         "SELECT * FROM agent_configs WHERE id = $1 AND workspace_id = $2",
         [id, workspaceId],
       )
-    : await pool.query(
-        "SELECT * FROM agent_configs WHERE id = $1",
-        [id],
-      );
+    : workspaceId === null
+      ? await pool.query(
+          "SELECT * FROM agent_configs WHERE id = $1 AND workspace_id IS NULL",
+          [id],
+        )
+      : await pool.query(
+          "SELECT * FROM agent_configs WHERE id = $1",
+          [id],
+        );
 
   return rows.length > 0 ? rowToConfig(rows[0]) : null;
 }
@@ -107,13 +119,8 @@ export async function getGrantedAgentConfig(
 export async function resolveAgentForWorkspace(
   agentId: string,
   inMemoryConfig: AgentConfig,
-  workspaceId: string | undefined,
+  workspaceId: string | null | undefined,
 ): Promise<{ config: AgentConfig; source: "owned" | "granted" | "global" } | null> {
-  // Personal workspace — no scoping needed
-  if (!workspaceId) {
-    return { config: inMemoryConfig, source: "global" };
-  }
-
   const pool = getPool();
 
   // Check if the agent exists in agent_configs at all
@@ -121,6 +128,14 @@ export async function resolveAgentForWorkspace(
     "SELECT workspace_id FROM agent_configs WHERE id = $1",
     [agentId],
   );
+
+  // Personal scope (no workspace) — only global agents are reachable. The
+  // in-memory registry holds every tenant's agents, so an agent owned by any
+  // workspace must be denied here rather than served from memory.
+  if (!workspaceId) {
+    if (dbRows.some((r) => r.workspace_id !== null)) return null;
+    return { config: inMemoryConfig, source: "global" };
+  }
 
   // Agent not in DB at all → it's a global astra.yml agent, always allowed
   if (dbRows.length === 0) {
@@ -203,7 +218,13 @@ export async function updateAgentConfig(
 
   const { rows } = await pool.query(
     `UPDATE agent_configs SET ${setClauses.join(", ")}
-     WHERE id = $${paramIndex}${workspaceId ? ` AND workspace_id = $${paramIndex + 1}` : ""}
+     WHERE id = $${paramIndex}${
+       workspaceId
+         ? ` AND workspace_id = $${paramIndex + 1}`
+         : workspaceId === null
+           ? " AND workspace_id IS NULL"
+           : ""
+     }
      RETURNING *`,
     workspaceId ? [...values, workspaceId] : values,
   );
@@ -230,13 +251,21 @@ export async function deleteAgentConfig(id: string, workspaceId?: string | null)
         "DELETE FROM agent_configs WHERE id = $1 AND workspace_id = $2",
         [id, workspaceId],
       )
-    : await pool.query(
-        "DELETE FROM agent_configs WHERE id = $1",
-        [id],
-      );
+    : workspaceId === null
+      ? await pool.query(
+          "DELETE FROM agent_configs WHERE id = $1 AND workspace_id IS NULL",
+          [id],
+        )
+      : await pool.query(
+          "DELETE FROM agent_configs WHERE id = $1",
+          [id],
+        );
 
-  unregisterAgentConfig(id);
-  return (rowCount ?? 0) > 0;
+  const deleted = (rowCount ?? 0) > 0;
+  // Only drop the runtime entry when a row was actually deleted — otherwise a
+  // caller without access could evict another tenant's agent from memory.
+  if (deleted) unregisterAgentConfig(id);
+  return deleted;
 }
 
 export async function loadAgentConfigs(workspaceId?: string): Promise<void> {

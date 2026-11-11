@@ -1,6 +1,12 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer } from "http";
-import { verifyAccessToken } from "../auth/jwt.js";
+import {
+  WS_MAX_PAYLOAD_BYTES,
+  isAllowedWsOrigin,
+  extractWsToken,
+  authenticateWs,
+  closeOnTokenExpiry,
+} from "./ws-auth.js";
 import { getEventBus } from "../events/index.js";
 import { createLogger } from "../utils/logger.js";
 import { checkConnectionRateLimit, initMessageRateLimit, checkMessageRateLimit } from "./middleware/ws-rate-limit.js";
@@ -27,7 +33,37 @@ export function initWebSocket(
   server: HttpServer,
   resolveClient?: (config: AgentConfig) => InferenceClient,
 ): WebSocketServer {
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  // noServer + an explicit upgrade listener: a `{ server, path }` server
+  // answers 400 to every other upgrade path, which broke /playground/ws.
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: WS_MAX_PAYLOAD_BYTES,
+    // Echo the "bearer.<jwt>" subprotocol when a client authenticates with it
+    handleProtocols: (protocols: Set<string>) => {
+      for (const p of protocols) if (p.startsWith("bearer.")) return p;
+      return false;
+    },
+  });
+
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+    if (pathname !== "/ws") {
+      // Playground sockets are handled by their own listener; anything else
+      // is not a WebSocket endpoint.
+      if (!pathname.startsWith("/playground/ws/")) {
+        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        socket.destroy();
+      }
+      return;
+    }
+    // Reject cross-site handshakes before the upgrade completes
+    if (!isAllowedWsOrigin(req)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
 
   wss.on("connection", async (ws: WebSocket, req) => {
     const socket = ws as AuthenticatedSocket;
@@ -38,9 +74,9 @@ export function initWebSocket(
       return;
     }
 
-    // Extract token from query: ws://host/ws?token=<jwt-access-token>
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    const token = url.searchParams.get("token");
+    // Token from Authorization header, "bearer.<jwt>" subprotocol, or the
+    // legacy ?token= query parameter.
+    const token = extractWsToken(req);
 
     if (!token) {
       socket.close(4001, "Missing token");
@@ -48,9 +84,11 @@ export function initWebSocket(
     }
 
     try {
-      const { uid } = await verifyAccessToken(token);
+      const { uid, expiresAt } = await authenticateWs(req, token);
       socket.uid = uid;
       socket.alive = true;
+      // A socket must not outlive the access token that opened it
+      closeOnTokenExpiry(socket, expiresAt);
     } catch {
       socket.close(4003, "Invalid token");
       return;

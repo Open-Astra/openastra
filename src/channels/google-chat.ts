@@ -21,9 +21,43 @@ import type {
 } from "./base.js";
 import { handleIncomingMessage } from "./base.js";
 import { createLogger } from "../utils/logger.js";
-import type { Express } from "express";
+import type { IRouter, Request } from "express";
+import * as jose from "jose";
+import { verifySharedSecret, unsignedWebhooksAllowed } from "./webhook-verify.js";
 import { readFile } from "node:fs/promises";
 import { createSign } from "node:crypto";
+
+const GOOGLE_CHAT_ISSUER = "chat@system.gserviceaccount.com";
+const googleChatJwks = jose.createRemoteJWKSet(
+  new URL(`https://www.googleapis.com/service_accounts/v1/jwk/${GOOGLE_CHAT_ISSUER}`),
+);
+
+/**
+ * Verify an inbound Google Chat event.
+ *   GOOGLE_CHAT_PROJECT_NUMBER → verify Google's bearer JWT (preferred)
+ *   GOOGLE_CHAT_WEBHOOK_SECRET → shared secret fallback
+ * With neither set the request is refused.
+ */
+async function verifyGoogleChatRequest(req: Request): Promise<boolean> {
+  const audience = process.env.GOOGLE_CHAT_PROJECT_NUMBER;
+  if (audience) {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ")) return false;
+    try {
+      await jose.jwtVerify(auth.slice(7), googleChatJwks, {
+        issuer: GOOGLE_CHAT_ISSUER,
+        audience,
+        algorithms: ["RS256"],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const shared = process.env.GOOGLE_CHAT_WEBHOOK_SECRET;
+  if (shared) return verifySharedSecret(req, shared, { allowQuery: true });
+  return unsignedWebhooksAllowed();
+}
 
 const log = createLogger("google-chat");
 
@@ -80,7 +114,7 @@ export class GoogleChatAdapter implements ChannelAdapter {
   readonly channelType = "google-chat" as const;
   private serviceAccountKeyPath: string | undefined;
   private resolveClient: ClientResolver;
-  private app: Express | null;
+  private app: IRouter | null;
   private accessToken: string | null = null;
   private tokenExpiry = 0;
   private serviceAccount: ServiceAccountKey | null = null;
@@ -88,7 +122,7 @@ export class GoogleChatAdapter implements ChannelAdapter {
   constructor(
     resolveClient: ClientResolver,
     serviceAccountKeyPath?: string,
-    app?: Express,
+    app?: IRouter,
   ) {
     this.serviceAccountKeyPath = serviceAccountKeyPath;
     this.resolveClient = resolveClient;
@@ -205,7 +239,15 @@ export class GoogleChatAdapter implements ChannelAdapter {
     }
 
     if (this.app) {
-      this.app.post("/webhooks/google-chat", (req, res) => {
+      this.app.post("/webhooks/google-chat", async (req, res) => {
+        // Google Chat authenticates with a bearer JWT signed by
+        // chat@system.gserviceaccount.com whose audience is this app's
+        // Cloud project number.
+        if (!(await verifyGoogleChatRequest(req))) {
+          log.warn("Rejected Google Chat webhook — invalid or missing bearer token");
+          res.sendStatus(401);
+          return;
+        }
         const event = req.body as GoogleChatEvent;
 
         // Respond synchronously for ADDED_TO_SPACE
@@ -311,7 +353,7 @@ let _adapter: GoogleChatAdapter | null = null;
 export function startGoogleChatChannel(
   resolveClient: ClientResolver,
   serviceAccountKeyPath?: string,
-  app?: Express,
+  app?: IRouter,
 ): void {
   _adapter = new GoogleChatAdapter(resolveClient, serviceAccountKeyPath, app);
   _adapter.start();

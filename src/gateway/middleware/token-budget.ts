@@ -49,8 +49,14 @@ export function tokenBudget() {
 
       next();
     } catch (err) {
-      // Budget check failure should not block the request
       console.error("[token-budget] Check failed:", err);
+      // Fail closed in production: an unreachable budget store must not
+      // become unlimited free inference. TOKEN_BUDGET_FAIL_OPEN=true
+      // restores the old availability-first behaviour.
+      if (process.env.NODE_ENV === "production" && process.env.TOKEN_BUDGET_FAIL_OPEN !== "true") {
+        res.status(503).json({ error: "Usage limits are temporarily unavailable. Please retry." });
+        return;
+      }
       next();
     }
   };
