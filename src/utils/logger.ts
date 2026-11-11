@@ -122,7 +122,7 @@ export function scrubLogOutput(message: string): string {
  * Scrub an argument that may be a string, object, or other value.
  */
 function stripNewlines(s: string): string {
-  return s.replace(/\n|\r/g, " ");
+  return s.replace(/\n|\r/g, "");
 }
 
 function scrubArg(arg: unknown): unknown {

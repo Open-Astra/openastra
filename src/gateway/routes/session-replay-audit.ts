@@ -66,7 +66,7 @@ export function createSessionReplayAuditRouter(): Router {
         res.status(404).json({ error: message });
         return;
       }
-      console.error("[session-replay-audit] GET transcript error:", String(err instanceof Error ? err.message : err).replace(/\n|\r/g, " "));
+      console.error("[session-replay-audit] GET transcript error:", String(err instanceof Error ? err.message : err).replace(/\n|\r/g, ""));
       res.status(500).json({ error: "Failed to retrieve session transcript" });
     }
   });

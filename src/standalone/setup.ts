@@ -12,7 +12,7 @@
 // TUI that walks you through every configuration option.
 
 import { createInterface } from "node:readline";
-import { writeFile, access, open, chmod } from "node:fs/promises";
+import { writeFile, access, open } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -337,8 +337,16 @@ async function main(): Promise<void> {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     writeEnv = await askYesNo(".env already exists. Overwrite?", false);
     if (writeEnv) {
-      await writeFile(envPath, envBody, { mode: 0o600 });
-      await chmod(envPath, 0o600).catch(() => {});
+      // Reuse one handle for truncate, write and chmod so nothing is resolved
+      // by path again after the existence check.
+      const handle = await open(envPath, "r+");
+      try {
+        await handle.truncate(0);
+        await handle.writeFile(envBody);
+        await handle.chmod(0o600);
+      } finally {
+        await handle.close();
+      }
     }
   }
 
