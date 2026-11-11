@@ -1,4 +1,4 @@
-FROM node:20-slim AS builder
+FROM node:25-slim AS builder
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ RUN npm run build
 # Pin by digest for reproducible production builds, e.g.
 #   FROM node:20-slim@sha256:<digest>   (docker buildx imagetools inspect node:20-slim)
 # Dependabot (.github/dependabot.yml, "docker" ecosystem) keeps the tag current.
-FROM node:20-slim
+FROM node:25-slim
 
 WORKDIR /app
 
