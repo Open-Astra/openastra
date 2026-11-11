@@ -35,7 +35,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@aws-sdk/client-bedrock-runtime": "^3.997.0",
-    "@google-analytics/data": "^5.2.2",
+    "@google-analytics/data": "^7.3.0",
     "@google/genai": "^1.45.0",
     "@google/generative-ai": "^0.24.1",
     "@grpc/grpc-js": "^1.14.3",
